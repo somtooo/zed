@@ -495,16 +495,12 @@ pub fn map_to_language_model_completion_events(
 }
 
 pub struct CopilotResponsesEventMapper {
-    text_buffer: String,
-    stop_triggered: bool,
     pending_stop_reason: Option<StopReason>,
 }
 
 impl CopilotResponsesEventMapper {
     pub fn new() -> Self {
         Self {
-            text_buffer: String::new(),
-            stop_triggered: false,
             pending_stop_reason: None,
         }
     }
@@ -527,28 +523,23 @@ impl CopilotResponsesEventMapper {
         event: copilot::copilot_responses::StreamEvent,
     ) -> Vec<Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
         match event {
-            copilot::copilot_responses::StreamEvent::OutputItemAdded { item, .. } => {
-                let mut events = self.flush_text_buffer();
-                self.stop_triggered = false;
-
-                match item {
-                    copilot::copilot_responses::ResponseOutputItem::Message { id, .. } => {
-                        events.push(Ok(LanguageModelCompletionEvent::StartMessage {
-                            message_id: id,
-                        }));
-                    }
-                    copilot::copilot_responses::ResponseOutputItem::FunctionCall { .. } => {}
-                    copilot::copilot_responses::ResponseOutputItem::Reasoning { .. } => {}
+            copilot::copilot_responses::StreamEvent::OutputItemAdded { item, .. } => match item {
+                copilot::copilot_responses::ResponseOutputItem::Message { id, .. } => {
+                    vec![Ok(LanguageModelCompletionEvent::StartMessage {
+                        message_id: id,
+                    })]
                 }
-                events
-            }
+                _ => Vec::new(),
+            },
             copilot::copilot_responses::StreamEvent::OutputTextDelta { delta, .. } => {
-                self.handle_text_delta(delta)
+                if delta.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Ok(LanguageModelCompletionEvent::Text(delta))]
+                }
             }
             copilot::copilot_responses::StreamEvent::OutputItemDone { item, .. } => match item {
-                copilot::copilot_responses::ResponseOutputItem::Message { .. } => {
-                    self.flush_text_buffer()
-                }
+                copilot::copilot_responses::ResponseOutputItem::Message { .. } => Vec::new(),
                 copilot::copilot_responses::ResponseOutputItem::FunctionCall {
                     call_id,
                     name,
@@ -609,7 +600,7 @@ impl CopilotResponsesEventMapper {
                 }
             },
             copilot::copilot_responses::StreamEvent::Completed { response } => {
-                let mut events = self.flush_text_buffer();
+                let mut events = Vec::new();
                 // Usage update first (if present)
                 if let Some(usage) = response.usage {
                     events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
@@ -695,27 +686,6 @@ impl CopilotResponsesEventMapper {
             copilot::copilot_responses::StreamEvent::Created { .. }
             | copilot::copilot_responses::StreamEvent::Unknown => Vec::new(),
         }
-    }
-
-    fn flush_text_buffer(
-        &mut self,
-    ) -> Vec<Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
-        if self.text_buffer.is_empty() {
-            Vec::new()
-        } else {
-            let text = std::mem::take(&mut self.text_buffer);
-            vec![Ok(LanguageModelCompletionEvent::Text(text))]
-        }
-    }
-
-    fn handle_text_delta(
-        &mut self,
-        delta: String,
-    ) -> Vec<Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
-        if delta.is_empty() {
-            return Vec::new();
-        }
-        vec![Ok(LanguageModelCompletionEvent::Text(delta))]
     }
 }
 
