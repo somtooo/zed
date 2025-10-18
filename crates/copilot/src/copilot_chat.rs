@@ -372,7 +372,7 @@ pub struct Usage {
 
 #[derive(Debug, Deserialize)]
 pub struct ResponseChoice {
-    pub index: usize,
+    pub index: Option<usize>,
     pub finish_reason: Option<String>,
     pub delta: Option<ResponseDelta>,
     pub message: Option<ResponseDelta>,
@@ -385,10 +385,9 @@ pub struct ResponseDelta {
     #[serde(default)]
     pub tool_calls: Vec<ToolCallChunk>,
 }
-
 #[derive(Deserialize, Debug, Eq, PartialEq)]
 pub struct ToolCallChunk {
-    pub index: usize,
+    pub index: Option<usize>,
     pub id: Option<String>,
     pub function: Option<FunctionChunk>,
 }

@@ -397,11 +397,9 @@ pub fn map_to_language_model_completion_events(
                             events.push(Ok(LanguageModelCompletionEvent::Text(content)));
                         }
 
-                        for tool_call in &delta.tool_calls {
-                            let entry = state
-                                .tool_calls_by_index
-                                .entry(tool_call.index)
-                                .or_default();
+                        for (index, tool_call) in delta.tool_calls.iter().enumerate() {
+                            let tool_index = tool_call.index.unwrap_or(index);
+                            let entry = state.tool_calls_by_index.entry(tool_index).or_default();
 
                             if let Some(tool_id) = tool_call.id.clone() {
                                 entry.id = tool_id;
