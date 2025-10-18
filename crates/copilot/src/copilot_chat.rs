@@ -15,6 +15,8 @@ use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
 use itertools::Itertools;
 use paths::home_dir;
 use serde::{Deserialize, Serialize};
+
+use crate::copilot_responses as responses;
 use settings::watch_config_dir;
 
 pub const COPILOT_OAUTH_ENV_VAR: &str = "GH_COPILOT_TOKEN";
@@ -42,8 +44,12 @@ impl CopilotChatConfiguration {
         }
     }
 
-    pub fn api_url_from_endpoint(&self, endpoint: &str) -> String {
+    pub fn chat_completions_url_from_endpoint(&self, endpoint: &str) -> String {
         format!("{}/chat/completions", endpoint)
+    }
+
+    pub fn responses_url_from_endpoint(&self, endpoint: &str) -> String {
+        format!("{}/responses", endpoint)
     }
 
     pub fn models_url_from_endpoint(&self, endpoint: &str) -> String {
@@ -69,6 +75,14 @@ pub enum Role {
     User,
     Assistant,
     System,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub enum ModelSupportedEndpoint {
+    #[serde(rename = "/chat/completions")]
+    ChatCompletions,
+    #[serde(rename = "/responses")]
+    Responses,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +123,8 @@ pub struct Model {
     // reached. Zed does not currently implement this behaviour
     is_chat_fallback: bool,
     model_picker_enabled: bool,
+    #[serde(default)]
+    supported_endpoints: Vec<ModelSupportedEndpoint>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -224,6 +240,16 @@ impl Model {
     pub fn tokenizer(&self) -> Option<&str> {
         self.capabilities.tokenizer.as_deref()
     }
+
+    pub fn supports_response(&self) -> bool {
+        self.supported_endpoints.len() > 0
+            && !self
+                .supported_endpoints
+                .contains(&ModelSupportedEndpoint::ChatCompletions)
+            && self
+                .supported_endpoints
+                .contains(&ModelSupportedEndpoint::Responses)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,7 +279,7 @@ pub enum Tool {
     Function { function: Function },
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolChoice {
     Auto,
@@ -346,7 +372,7 @@ pub struct Usage {
 
 #[derive(Debug, Deserialize)]
 pub struct ResponseChoice {
-    pub index: usize,
+    pub index: Option<usize>,
     pub finish_reason: Option<String>,
     pub delta: Option<ResponseDelta>,
     pub message: Option<ResponseDelta>,
@@ -362,7 +388,7 @@ pub struct ResponseDelta {
 
 #[derive(Deserialize, Debug, Eq, PartialEq)]
 pub struct ToolCallChunk {
-    pub index: usize,
+    pub index: Option<usize>,
     pub id: Option<String>,
     pub function: Option<FunctionChunk>,
 }
@@ -549,11 +575,9 @@ impl CopilotChat {
         self.models.as_deref()
     }
 
-    pub async fn stream_completion(
-        request: Request,
-        is_user_initiated: bool,
+    async fn client_token_and_config(
         mut cx: AsyncApp,
-    ) -> Result<BoxStream<'static, Result<ResponseEvent>>> {
+    ) -> Result<(Arc<dyn HttpClient>, ApiToken, CopilotChatConfiguration)> {
         let this = cx
             .update(|cx| Self::global(cx))
             .ok()
@@ -585,8 +609,51 @@ impl CopilotChat {
             }
         };
 
-        let api_url = configuration.api_url_from_endpoint(&token.api_endpoint);
+        Ok((client, token, configuration))
+    }
+
+    pub async fn stream_completion(
+        request: Request,
+        is_user_initiated: bool,
+        cx: AsyncApp,
+    ) -> Result<BoxStream<'static, Result<ResponseEvent>>> {
+        let (client, token, configuration) = Self::client_token_and_config(cx).await?;
+        let api_url = configuration.chat_completions_url_from_endpoint(&token.api_endpoint);
         stream_completion(
+            client.clone(),
+            token.api_key,
+            api_url.into(),
+            request,
+            is_user_initiated,
+        )
+        .await
+    }
+
+    pub async fn stream_response(
+        request: responses::Request,
+        is_user_initiated: bool,
+        cx: AsyncApp,
+    ) -> Result<BoxStream<'static, Result<responses::StreamEvent>>> {
+        let (client, token, configuration) = Self::client_token_and_config(cx).await?;
+        let api_url = configuration.responses_url_from_endpoint(&token.api_endpoint);
+        responses::stream_response(
+            client.clone(),
+            token.api_key,
+            api_url.into(),
+            request,
+            is_user_initiated,
+        )
+        .await
+    }
+
+    pub async fn get_response(
+        request: responses::Request,
+        is_user_initiated: bool,
+        cx: AsyncApp,
+    ) -> Result<responses::Response> {
+        let (client, token, configuration) = Self::client_token_and_config(cx).await?;
+        let api_url = configuration.responses_url_from_endpoint(&token.api_endpoint);
+        responses::get_response(
             client.clone(),
             token.api_key,
             api_url.into(),

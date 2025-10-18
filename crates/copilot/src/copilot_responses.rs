@@ -1,0 +1,413 @@
+use super::*;
+use anyhow::{Result, anyhow};
+use futures::{AsyncBufReadExt, AsyncReadExt, StreamExt, io::BufReader, stream::BoxStream};
+use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+pub use settings::OpenAiReasoningEffort as ReasoningEffort;
+
+// Todo: truncation is relevant maybe.
+// Todo: parallel tool calls might be nice
+// Todo: add max tokens here since we dont have stop sequence
+#[derive(Serialize, Debug)]
+pub struct Request {
+    pub model: String,
+    pub input: Vec<ResponseInputItem>, // Different from messages array
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // make sure there is no default value set for this
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<ResponseIncludable>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseIncludable {
+    #[serde(rename = "reasoning.encrypted_content")]
+    ReasoningEncryptedContent,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolDefinition {
+    Function {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parameters: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoice {
+    Auto,
+    Any,
+    None,
+    #[serde(untagged)]
+    Other(ToolDefinition),
+}
+
+#[derive(Serialize, Debug)]
+pub struct ReasoningConfig {
+    pub effort: ReasoningEffort,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+impl Default for ResponseImageDetail {
+    fn default() -> Self {
+        ResponseImageDetail::Auto
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseInputContent {
+    InputText {
+        text: String,
+    },
+    OutputText {
+        text: String,
+    },
+    InputImage {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image_url: Option<String>,
+        #[serde(default)]
+        detail: ResponseImageDetail,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum ResponseFunctionOutput {
+    Text(String),
+    Content(Vec<ResponseInputContent>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseInputItem {
+    Message {
+        role: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<ResponseInputContent>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<ItemStatus>,
+    },
+    FunctionCallOutput {
+        call_id: String,
+        output: ResponseFunctionOutput,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<ItemStatus>,
+    },
+    Reasoning {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        summary: Vec<ResponseReasoningItem>,
+        encrypted_content: String,
+    },
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    #[serde(rename = "max_output_tokens")]
+    MaxOutputTokens,
+    #[serde(rename = "content_filter")]
+    ContentFilter,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct IncompleteDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<IncompleteReason>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ResponseReasoningItem {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
+}
+
+// make these names match the actual api docs
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    #[serde(rename = "error")]
+    GenericError { error: ResponseError },
+
+    #[serde(rename = "response.created")]
+    Created { response: Response },
+
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded {
+        output_index: usize,
+        #[serde(default)]
+        sequence_number: Option<u64>,
+        item: ResponseOutputItem,
+    },
+
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta {
+        item_id: String,
+        output_index: usize,
+        delta: String,
+    },
+
+    #[serde(rename = "response.output_item.done")]
+    OutputItemDone {
+        output_index: usize,
+        #[serde(default)]
+        sequence_number: Option<u64>,
+        item: ResponseOutputItem,
+    },
+
+    #[serde(rename = "response.incomplete")]
+    Incomplete { response: Response },
+
+    #[serde(rename = "response.completed")]
+    Completed { response: Response },
+
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ResponseError {
+    pub message: String,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct Response {
+    pub id: Option<String>,
+    pub status: Option<String>,
+    pub usage: Option<ResponseUsage>,
+    pub output: Vec<ResponseOutputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<IncompleteDetails>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct ResponseUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseOutputItem {
+    Message {
+        id: String,
+        role: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<ResponseOutputContent>>,
+    },
+    FunctionCall {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        call_id: String,
+        name: String,
+        arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<ItemStatus>,
+    },
+    Reasoning {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<Vec<ResponseReasoningItem>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseOutputContent {
+    OutputText { text: String },
+    Refusal { refusal: String }, // Not currently handled explicitly
+}
+
+pub async fn stream_response(
+    client: Arc<dyn HttpClient>,
+    api_key: String,
+    api_url: String,
+    request: Request,
+    is_user_initiated: bool,
+) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+    let is_vision_request = request.input.iter().any(|item| match item {
+        ResponseInputItem::Message {
+            content: Some(parts),
+            ..
+        } => parts
+            .iter()
+            .any(|p| matches!(p, ResponseInputContent::InputImage { .. })),
+        _ => false,
+    });
+
+    let request_initiator = if is_user_initiated { "user" } else { "agent" };
+
+    let request_builder = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(&api_url)
+        .header(
+            "Editor-Version",
+            format!(
+                "Zed/{}",
+                option_env!("CARGO_PKG_VERSION").unwrap_or("unknown")
+            ),
+        )
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("X-Initiator", request_initiator);
+
+    let request_builder = if is_vision_request {
+        request_builder.header("Copilot-Vision-Request", "true")
+    } else {
+        request_builder
+    };
+
+    let is_streaming = request.stream;
+    let request = request_builder.body(AsyncBody::from(serde_json::to_string(&request)?))?;
+    let mut response = client.send(request).await?;
+
+    if !response.status().is_success() {
+        let mut body = String::new();
+        response.body_mut().read_to_string(&mut body).await?;
+        anyhow::bail!("Failed to connect to API: {} {}", response.status(), body);
+    }
+
+    if is_streaming {
+        let reader = BufReader::new(response.into_body());
+        Ok(reader
+            .lines()
+            .filter_map(|line| async move {
+                match line {
+                    Ok(line) => {
+                        let line = line.strip_prefix("data: ")?;
+                        if line.starts_with("[DONE]") || line.is_empty() {
+                            return None;
+                        }
+
+                        match serde_json::from_str::<StreamEvent>(line) {
+                            Ok(event) => Some(Ok(event)),
+                            Err(error) => {
+                                log::error!(
+                                    "Failed to parse Copilot responses stream event: `{}`\nResponse: `{}`",
+                                    error,
+                                    line,
+                                );
+                                Some(Err(anyhow!(error)))
+                            }
+                        }
+                    }
+                    Err(error) => Some(Err(anyhow!(error))),
+                }
+            })
+            .boxed())
+    } else {
+        Err(anyhow!(
+            "stream_response called with non-streaming request; use get_response instead"
+        ))
+    }
+}
+
+pub async fn get_response(
+    client: Arc<dyn HttpClient>,
+    api_key: String,
+    api_url: String,
+    request: Request,
+    is_user_initiated: bool,
+) -> Result<Response> {
+    let is_vision_request = request.input.iter().any(|item| match item {
+        ResponseInputItem::Message {
+            content: Some(parts),
+            ..
+        } => parts
+            .iter()
+            .any(|p| matches!(p, ResponseInputContent::InputImage { .. })),
+        _ => false,
+    });
+
+    let request_initiator = if is_user_initiated { "user" } else { "agent" };
+
+    let request_builder = HttpRequest::builder()
+        .method(Method::POST)
+        .uri(&api_url)
+        .header(
+            "Editor-Version",
+            format!(
+                "Zed/{}",
+                option_env!("CARGO_PKG_VERSION").unwrap_or("unknown")
+            ),
+        )
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .header("Copilot-Integration-Id", "vscode-chat")
+        .header("X-Initiator", request_initiator);
+
+    let request_builder = if is_vision_request {
+        request_builder.header("Copilot-Vision-Request", "true")
+    } else {
+        request_builder
+    };
+
+    let request = request_builder.body(AsyncBody::from(serde_json::to_string(&request)?))?;
+    let mut response = client.send(request).await?;
+
+    if !response.status().is_success() {
+        let mut body = String::new();
+        response.body_mut().read_to_string(&mut body).await?;
+        anyhow::bail!("Failed to connect to API: {} {}", response.status(), body);
+    }
+
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await?;
+
+    match serde_json::from_str::<Response>(&body) {
+        Ok(resp) => Ok(resp),
+        Err(error) => {
+            log::error!(
+                "Failed to parse Copilot non-streaming response: `{}`\nResponse: `{}`",
+                error,
+                body,
+            );
+            Err(anyhow!(error))
+        }
+    }
+}
