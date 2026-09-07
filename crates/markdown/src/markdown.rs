@@ -111,7 +111,10 @@ pub struct MarkdownStyle {
     pub code_block: StyleRefinement,
     pub code_block_overflow_x_scroll: bool,
     pub inline_code: TextStyleRefinement,
+    pub emphasis: TextStyleRefinement,
+    pub strong: TextStyleRefinement,
     pub block_quote: TextStyleRefinement,
+    pub list_marker: TextStyleRefinement,
     pub link: TextStyleRefinement,
     pub link_callback: Option<LinkStyleCallback>,
     pub rule_color: Hsla,
@@ -142,7 +145,16 @@ impl Default for MarkdownStyle {
             code_block: Default::default(),
             code_block_overflow_x_scroll: false,
             inline_code: Default::default(),
+            emphasis: TextStyleRefinement {
+                font_style: Some(FontStyle::Italic),
+                ..Default::default()
+            },
+            strong: TextStyleRefinement {
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
             block_quote: Default::default(),
+            list_marker: Default::default(),
             link: Default::default(),
             link_callback: None,
             rule_color: Default::default(),
@@ -236,6 +248,69 @@ impl MarkdownStyle {
             ..Default::default()
         });
 
+        let inline_code = themed_text_style(
+            syntax,
+            &["string", "text.literal"],
+            TextStyleRefinement {
+                font_family: Some(code_font_family.clone()),
+                font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
+                font_features: Some(theme_settings.buffer_font.features.clone()),
+                font_size: Some(buffer_font_size.into()),
+                font_weight: Some(buffer_font_weight),
+                background_color: Some(colors.editor_foreground.opacity(0.08)),
+                color: Some(colors.text_accent),
+                ..Default::default()
+            },
+        );
+        let emphasis = themed_text_style(
+            syntax,
+            &["emphasis"],
+            TextStyleRefinement {
+                color: Some(cx.theme().status().warning),
+                font_style: Some(FontStyle::Italic),
+                ..Default::default()
+            },
+        );
+        let strong = themed_text_style(
+            syntax,
+            &["emphasis.strong"],
+            TextStyleRefinement {
+                color: Some(colors.text),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            },
+        );
+        let heading_text = themed_text_style(
+            syntax,
+            &["title"],
+            TextStyleRefinement {
+                color: Some(colors.text_accent),
+                font_weight: Some(FontWeight::SEMIBOLD),
+                ..Default::default()
+            },
+        );
+        let list_marker = themed_text_style(
+            syntax,
+            &["punctuation.list_marker"],
+            TextStyleRefinement::default(),
+        );
+        let mut link = themed_text_style(
+            syntax,
+            &["link_text"],
+            TextStyleRefinement {
+                background_color: Some(colors.editor_foreground.opacity(0.025)),
+                color: Some(colors.text_accent),
+                ..Default::default()
+            },
+        );
+        if link.underline.is_none() {
+            link.underline = Some(UnderlineStyle {
+                color: Some(link.color.unwrap_or(colors.text_accent).opacity(0.5)),
+                thickness: px(1.),
+                ..Default::default()
+            });
+        }
+
         let style = MarkdownStyle {
             base_text_style: text_style.clone(),
             syntax: syntax.clone(),
@@ -286,25 +361,15 @@ impl MarkdownStyle {
                 },
                 ..Default::default()
             },
-            inline_code: TextStyleRefinement {
-                font_family: Some(code_font_family),
-                font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
-                font_features: Some(theme_settings.buffer_font.features.clone()),
-                font_size: Some(buffer_font_size.into()),
-                font_weight: Some(buffer_font_weight),
-                background_color: Some(colors.editor_foreground.opacity(0.08)),
+            inline_code,
+            emphasis,
+            strong,
+            list_marker,
+            heading: StyleRefinement {
+                text: heading_text,
                 ..Default::default()
             },
-            link: TextStyleRefinement {
-                background_color: Some(colors.editor_foreground.opacity(0.025)),
-                color: Some(colors.text_accent),
-                underline: Some(UnderlineStyle {
-                    color: Some(colors.text_accent.opacity(0.5)),
-                    thickness: px(1.),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
+            link,
             soft_break_as_hard_break: matches!(font, MarkdownFont::Agent),
             heading_level_styles: matches!(font, MarkdownFont::Agent).then_some(
                 HeadingLevelStyles {
@@ -358,8 +423,17 @@ impl MarkdownStyle {
 
         self.inline_code.color = Some(colors.text);
         self.inline_code.font_size = Some(rems(0.875).into());
+        self.emphasis.color = None;
+        self.strong.color = Some(colors.text);
+        self.list_marker = TextStyleRefinement::default();
 
         self.link.background_color = None;
+        self.link.color = Some(colors.text_accent);
+        self.link.underline = Some(UnderlineStyle {
+            color: Some(colors.text_accent.opacity(0.5)),
+            thickness: px(1.),
+            ..Default::default()
+        });
 
         self.block_quote.color = Some(colors.text_muted);
 
@@ -427,6 +501,27 @@ impl MarkdownStyle {
         self.base_text_style.color = colors.text_muted;
         self
     }
+}
+
+fn themed_text_style(
+    syntax: &SyntaxTheme,
+    names: &[&str],
+    mut fallback: TextStyleRefinement,
+) -> TextStyleRefinement {
+    for name in names {
+        if let Some(style) = syntax.style_for_name(name) {
+            fallback.refine(&TextStyleRefinement {
+                color: style.color,
+                font_weight: style.font_weight,
+                font_style: style.font_style,
+                background_color: style.background_color,
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+                ..Default::default()
+            });
+        }
+    }
+    fallback
 }
 
 /// Per-diagram view state, keyed by source offset in [`Markdown::mermaid_views`].
@@ -2800,22 +2895,27 @@ impl Element for MarkdownElement {
                                 } else {
                                     checkbox.visualization_only(true).into_any_element()
                                 }
-                            } else if let Some(bullet_index) = builder.next_bullet_index() {
-                                div().child(format!("{}.", bullet_index)).into_any_element()
                             } else {
-                                div().child("•").into_any_element()
+                                let marker = if let Some(bullet_index) = builder.next_bullet_index()
+                                {
+                                    format!("{}.", bullet_index)
+                                } else {
+                                    "•".to_string()
+                                };
+                                let mut marker_element = div().child(marker);
+                                marker_element.style().text.refine(&self.style.list_marker);
+                                marker_element.into_any_element()
                             };
                             self.push_markdown_list_item(&mut builder, bullet, range, markdown_end);
                         }
-                        MarkdownTag::Emphasis => builder.push_text_style(TextStyleRefinement {
-                            font_style: Some(FontStyle::Italic),
-                            ..Default::default()
-                        }),
-                        MarkdownTag::Strong => builder.push_text_style(TextStyleRefinement {
-                            font_weight: Some(FontWeight::BOLD),
-                            color: Some(cx.theme().colors().text),
-                            ..Default::default()
-                        }),
+                        MarkdownTag::Emphasis => {
+                            builder.push_text_style(self.style.emphasis.clone())
+                        }
+                        MarkdownTag::Strong => {
+                            let mut style = self.style.strong.clone();
+                            style.color.get_or_insert(cx.theme().colors().text);
+                            builder.push_text_style(style);
+                        }
                         MarkdownTag::Strikethrough => {
                             builder.push_text_style(TextStyleRefinement {
                                 strikethrough: Some(StrikethroughStyle {
