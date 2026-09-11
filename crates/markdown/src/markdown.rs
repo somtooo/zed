@@ -250,7 +250,7 @@ impl MarkdownStyle {
 
         let inline_code = themed_text_style(
             syntax,
-            &["string", "text.literal"],
+            "text.literal",
             TextStyleRefinement {
                 font_family: Some(code_font_family.clone()),
                 font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
@@ -264,7 +264,7 @@ impl MarkdownStyle {
         );
         let emphasis = themed_text_style(
             syntax,
-            &["emphasis"],
+            "emphasis",
             TextStyleRefinement {
                 color: Some(cx.theme().status().warning),
                 font_style: Some(FontStyle::Italic),
@@ -273,7 +273,7 @@ impl MarkdownStyle {
         );
         let strong = themed_text_style(
             syntax,
-            &["emphasis.strong"],
+            "emphasis.strong",
             TextStyleRefinement {
                 color: Some(colors.text),
                 font_weight: Some(FontWeight::BOLD),
@@ -282,7 +282,7 @@ impl MarkdownStyle {
         );
         let heading_text = themed_text_style(
             syntax,
-            &["title"],
+            "title",
             TextStyleRefinement {
                 color: Some(colors.text_accent),
                 font_weight: Some(FontWeight::SEMIBOLD),
@@ -291,12 +291,12 @@ impl MarkdownStyle {
         );
         let list_marker = themed_text_style(
             syntax,
-            &["punctuation.list_marker"],
+            "punctuation.list_marker",
             TextStyleRefinement::default(),
         );
         let mut link = themed_text_style(
             syntax,
-            &["link_text"],
+            "link_text",
             TextStyleRefinement {
                 background_color: Some(colors.editor_foreground.opacity(0.025)),
                 color: Some(colors.text_accent),
@@ -505,21 +505,19 @@ impl MarkdownStyle {
 
 fn themed_text_style(
     syntax: &SyntaxTheme,
-    names: &[&str],
+    syntax_style_name: &str,
     mut fallback: TextStyleRefinement,
 ) -> TextStyleRefinement {
-    for name in names {
-        if let Some(style) = syntax.style_for_name(name) {
-            fallback.refine(&TextStyleRefinement {
-                color: style.color,
-                font_weight: style.font_weight,
-                font_style: style.font_style,
-                background_color: style.background_color,
-                underline: style.underline,
-                strikethrough: style.strikethrough,
-                ..Default::default()
-            });
-        }
+    if let Some(style) = syntax.style_for_name(syntax_style_name) {
+        fallback.refine(&TextStyleRefinement {
+            color: style.color,
+            font_weight: style.font_weight,
+            font_style: style.font_style,
+            background_color: style.background_color,
+            underline: style.underline,
+            strikethrough: style.strikethrough,
+            ..Default::default()
+        });
     }
     fallback
 }
