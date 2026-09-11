@@ -248,9 +248,9 @@ impl MarkdownStyle {
             ..Default::default()
         });
 
-        let inline_code = refine_text_style_with_syntax_styles(
+        let inline_code = refine_text_style_with_syntax_style(
             syntax,
-            &["string", "text.literal"],
+            "text.literal",
             TextStyleRefinement {
                 font_family: Some(code_font_family.clone()),
                 font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
@@ -262,41 +262,41 @@ impl MarkdownStyle {
                 ..Default::default()
             },
         );
-        let emphasis = refine_text_style_with_syntax_styles(
+        let emphasis = refine_text_style_with_syntax_style(
             syntax,
-            &["emphasis"],
+            "emphasis",
             TextStyleRefinement {
                 color: Some(cx.theme().status().warning),
                 font_style: Some(FontStyle::Italic),
                 ..Default::default()
             },
         );
-        let strong = refine_text_style_with_syntax_styles(
+        let strong = refine_text_style_with_syntax_style(
             syntax,
-            &["emphasis.strong"],
+            "emphasis.strong",
             TextStyleRefinement {
                 color: Some(colors.text),
                 font_weight: Some(FontWeight::BOLD),
                 ..Default::default()
             },
         );
-        let heading_text = refine_text_style_with_syntax_styles(
+        let heading_text = refine_text_style_with_syntax_style(
             syntax,
-            &["title"],
+            "title",
             TextStyleRefinement {
                 color: Some(colors.text_accent),
                 font_weight: Some(FontWeight::SEMIBOLD),
                 ..Default::default()
             },
         );
-        let list_marker = refine_text_style_with_syntax_styles(
+        let list_marker = refine_text_style_with_syntax_style(
             syntax,
-            &["punctuation.list_marker"],
+            "punctuation.list_marker",
             TextStyleRefinement::default(),
         );
-        let mut link = refine_text_style_with_syntax_styles(
+        let mut link = refine_text_style_with_syntax_style(
             syntax,
-            &["link_text"],
+            "link_text",
             TextStyleRefinement {
                 background_color: Some(colors.editor_foreground.opacity(0.025)),
                 color: Some(colors.text_accent),
@@ -503,23 +503,21 @@ impl MarkdownStyle {
     }
 }
 
-fn refine_text_style_with_syntax_styles(
+fn refine_text_style_with_syntax_style(
     syntax: &SyntaxTheme,
-    syntax_style_names: &[&str],
+    syntax_style_name: &str,
     mut fallback: TextStyleRefinement,
 ) -> TextStyleRefinement {
-    for syntax_style_name in syntax_style_names {
-        if let Some(style) = syntax.style_for_name(syntax_style_name) {
-            fallback.refine(&TextStyleRefinement {
-                color: style.color,
-                font_weight: style.font_weight,
-                font_style: style.font_style,
-                background_color: style.background_color,
-                underline: style.underline,
-                strikethrough: style.strikethrough,
-                ..Default::default()
-            });
-        }
+    if let Some(style) = syntax.style_for_name(syntax_style_name) {
+        fallback.refine(&TextStyleRefinement {
+            color: style.color,
+            font_weight: style.font_weight,
+            font_style: style.font_style,
+            background_color: style.background_color,
+            underline: style.underline,
+            strikethrough: style.strikethrough,
+            ..Default::default()
+        });
     }
     fallback
 }
