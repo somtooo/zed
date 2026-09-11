@@ -34,8 +34,8 @@ use std::time::Duration;
 use collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Edges, Entity,
-    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, HighlightStyle, Hitbox, Hsla,
-    Image, ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
+    FocusHandle, Focusable, FontStyle, FontWeight, GlobalElementId, Hitbox, Hsla, Image,
+    ImageFormat, ImageSource, KeyContext, Length, MouseButton, MouseDownEvent, MouseEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollHandle, Stateful, StrikethroughStyle,
     StyleRefinement, StyledImage, StyledText, Subscription, Task, TextAlign, TextLayout, TextRun,
     TextStyle, TextStyleRefinement, WrappedLineLayout, actions, canvas, img, point, quad, relative,
@@ -248,53 +248,60 @@ impl MarkdownStyle {
             ..Default::default()
         });
 
-        let inline_code = TextStyleRefinement {
-            font_family: Some(code_font_family.clone()),
-            font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
-            font_features: Some(theme_settings.buffer_font.features.clone()),
-            font_size: Some(buffer_font_size.into()),
-            font_weight: Some(buffer_font_weight),
-            background_color: Some(colors.editor_foreground.opacity(0.08)),
-            color: Some(colors.text_accent),
-            ..Default::default()
-        };
-        let inline_code = refine_text_style(inline_code, syntax.style_for_name("string"));
-        let inline_code = refine_text_style(inline_code, syntax.style_for_name("text.literal"));
-        let emphasis = refine_text_style(
+        let inline_code = refine_text_style_with_syntax_styles(
+            syntax,
+            &["string", "text.literal"],
+            TextStyleRefinement {
+                font_family: Some(code_font_family.clone()),
+                font_fallbacks: theme_settings.buffer_font.fallbacks.clone(),
+                font_features: Some(theme_settings.buffer_font.features.clone()),
+                font_size: Some(buffer_font_size.into()),
+                font_weight: Some(buffer_font_weight),
+                background_color: Some(colors.editor_foreground.opacity(0.08)),
+                color: Some(colors.text_accent),
+                ..Default::default()
+            },
+        );
+        let emphasis = refine_text_style_with_syntax_styles(
+            syntax,
+            &["emphasis"],
             TextStyleRefinement {
                 color: Some(cx.theme().status().warning),
                 font_style: Some(FontStyle::Italic),
                 ..Default::default()
             },
-            syntax.style_for_name("emphasis"),
         );
-        let strong = refine_text_style(
+        let strong = refine_text_style_with_syntax_styles(
+            syntax,
+            &["emphasis.strong"],
             TextStyleRefinement {
                 color: Some(colors.text),
                 font_weight: Some(FontWeight::BOLD),
                 ..Default::default()
             },
-            syntax.style_for_name("emphasis.strong"),
         );
-        let heading_text = refine_text_style(
+        let heading_text = refine_text_style_with_syntax_styles(
+            syntax,
+            &["title"],
             TextStyleRefinement {
                 color: Some(colors.text_accent),
                 font_weight: Some(FontWeight::SEMIBOLD),
                 ..Default::default()
             },
-            syntax.style_for_name("title"),
         );
-        let list_marker = refine_text_style(
+        let list_marker = refine_text_style_with_syntax_styles(
+            syntax,
+            &["punctuation.list_marker"],
             TextStyleRefinement::default(),
-            syntax.style_for_name("punctuation.list_marker"),
         );
-        let mut link = refine_text_style(
+        let mut link = refine_text_style_with_syntax_styles(
+            syntax,
+            &["link_text"],
             TextStyleRefinement {
                 background_color: Some(colors.editor_foreground.opacity(0.025)),
                 color: Some(colors.text_accent),
                 ..Default::default()
             },
-            syntax.style_for_name("link_text"),
         );
         if link.underline.is_none() {
             link.underline = Some(UnderlineStyle {
@@ -496,20 +503,23 @@ impl MarkdownStyle {
     }
 }
 
-fn refine_text_style(
+fn refine_text_style_with_syntax_styles(
+    syntax: &SyntaxTheme,
+    syntax_style_names: &[&str],
     mut fallback: TextStyleRefinement,
-    syntax_style: Option<HighlightStyle>,
 ) -> TextStyleRefinement {
-    if let Some(style) = syntax_style {
-        fallback.refine(&TextStyleRefinement {
-            color: style.color,
-            font_weight: style.font_weight,
-            font_style: style.font_style,
-            background_color: style.background_color,
-            underline: style.underline,
-            strikethrough: style.strikethrough,
-            ..Default::default()
-        });
+    for syntax_style_name in syntax_style_names {
+        if let Some(style) = syntax.style_for_name(syntax_style_name) {
+            fallback.refine(&TextStyleRefinement {
+                color: style.color,
+                font_weight: style.font_weight,
+                font_style: style.font_style,
+                background_color: style.background_color,
+                underline: style.underline,
+                strikethrough: style.strikethrough,
+                ..Default::default()
+            });
+        }
     }
     fallback
 }
