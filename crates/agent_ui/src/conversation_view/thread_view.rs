@@ -22,6 +22,7 @@ use editor::actions::OpenExcerpts;
 use sandbox::{SandboxFsPolicy, SandboxNetPolicy, SandboxPolicy};
 
 use crate::completion_provider::{AvailableSkill, PromptLocalCommand, pluralize};
+use crate::entry_view_state::TerminalCardPresentation;
 use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{
     SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip, TerminalSandboxWarning,
@@ -39,7 +40,7 @@ use language_model::{
     LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry, Speed,
 };
 use notifications::status_toast::StatusToast;
-use settings::{update_settings_file, update_settings_file_with_completion};
+use settings::{TerminalCardDisplay, update_settings_file, update_settings_file_with_completion};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
     SplitButtonStyle, Tab, ToggleState,
@@ -1272,7 +1273,10 @@ impl ThreadView {
                 }
             }
             ViewEvent::NewTerminal(tool_call_id) => {
-                if AgentSettings::get_global(cx).expand_terminal_card {
+                if matches!(
+                    AgentSettings::get_global(cx).expand_terminal_card,
+                    TerminalCardDisplay::Auto | TerminalCardDisplay::AlwaysExpanded
+                ) {
                     self.entry_view_state.update(cx, |state, _cx| {
                         state.expand_tool_call(tool_call_id.clone());
                     });
@@ -1280,7 +1284,7 @@ impl ThreadView {
             }
             ViewEvent::TerminalMovedToBackground(tool_call_id) => {
                 self.entry_view_state.update(cx, |state, _cx| {
-                    state.collapse_tool_call(tool_call_id);
+                    state.collapse_terminal_tool_call(tool_call_id);
                 });
             }
             ViewEvent::MessageEditorEvent(_editor, MessageEditorEvent::Focus) => {
@@ -7117,6 +7121,40 @@ impl ThreadView {
         }
     }
 
+    fn expand_auto_compacted_terminal_tool_call(
+        &mut self,
+        entry_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let tool_call_id = {
+            let thread = self.thread.read(cx);
+            let Some(AgentThreadEntry::ToolCall(tool_call)) = thread.entries().get(entry_ix) else {
+                return;
+            };
+            let Some(terminal) = tool_call.terminals().next() else {
+                return;
+            };
+            let display = AgentSettings::get_global(cx).expand_terminal_card;
+            let presentation = self.entry_view_state.read(cx).terminal_card_presentation(
+                &tool_call.id,
+                display,
+                &tool_call.status,
+                terminal.read(cx).output().is_some(),
+                false,
+            );
+            if presentation != TerminalCardPresentation::Compact {
+                return;
+            }
+            tool_call.id.clone()
+        };
+
+        self.entry_view_state.update(cx, |state, _cx| {
+            state.expand_terminal_tool_call(tool_call_id);
+        });
+        self.list_state
+            .remeasure_items(entry_ix..entry_ix.saturating_add(1));
+    }
+
     /// Hides the thread search bar, clears its highlights, and returns focus to
     /// the message editor. Returns `true` if the search bar was visible.
     pub(crate) fn close_thread_search(
@@ -7154,6 +7192,7 @@ impl ThreadView {
                     let view = view.clone();
                     cx.defer(move |cx| {
                         view.update(cx, |this, cx| {
+                            this.expand_auto_compacted_terminal_tool_call(entry_ix, cx);
                             this.list_state.scroll_to(gpui::ListOffset {
                                 item_ix: entry_ix,
                                 offset_in_item: gpui::px(0.),
@@ -7867,18 +7906,25 @@ impl ThreadView {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "current directory".to_string());
 
-        let command_element = self.render_collapsible_command(
-            header_group.clone(),
-            false,
-            tool_call.label.clone(),
-            window,
-            cx,
-        );
-
-        let is_expanded = self
+        let terminal_view = self
             .entry_view_state
             .read(cx)
-            .is_tool_call_expanded(&tool_call.id);
+            .entry(entry_ix)
+            .and_then(|entry| entry.terminal(terminal));
+        let terminal_is_focused = terminal_view
+            .as_ref()
+            .is_some_and(|terminal_view| terminal_view.focus_handle(cx).is_focused(window));
+        let terminal_card_display = AgentSettings::get_global(cx).expand_terminal_card;
+        let entry_view_state = self.entry_view_state.read(cx);
+        let presentation = entry_view_state.terminal_card_presentation(
+            &tool_call.id,
+            terminal_card_display,
+            &tool_call.status,
+            output.is_some(),
+            terminal_is_focused,
+        );
+        let compact = presentation == TerminalCardPresentation::Compact;
+        let is_expanded = presentation == TerminalCardPresentation::Expanded;
 
         let truncated_tooltip = truncated_output.then(|| {
             if let Some(output) = output {
@@ -7903,7 +7949,7 @@ impl ThreadView {
 
         let header = TerminalToolHeader::new(
             terminal.entity_id().to_string(),
-            header_group,
+            header_group.clone(),
             working_dir,
             is_expanded,
         )
@@ -7913,7 +7959,11 @@ impl ThreadView {
             let id = tool_call.id.clone();
             move |this, _event, window, cx| {
                 this.entry_view_state.update(cx, |state, _cx| {
-                    state.toggle_tool_call_expansion(&id);
+                    state.toggle_terminal_tool_call_expansion(
+                        &id,
+                        terminal_card_display,
+                        presentation,
+                    );
                 });
                 this.refresh_thread_search(window, cx);
                 cx.notify();
@@ -7941,13 +7991,16 @@ impl ThreadView {
         .when_some(tool_call.sandbox_not_applied.as_ref(), |header, reason| {
             header.sandbox_warning(self.sandbox_not_applied_warning(reason, cx))
         })
-        .command_slot(command_element);
-
-        let terminal_view = self
-            .entry_view_state
-            .read(cx)
-            .entry(entry_ix)
-            .and_then(|entry| entry.terminal(terminal));
+        .compact(compact)
+        .when(!compact, |header| {
+            header.command_slot(self.render_collapsible_command(
+                header_group.clone(),
+                false,
+                tool_call.label.clone(),
+                window,
+                cx,
+            ))
+        });
 
         v_flex()
             .when(layout == ToolCallLayout::Standalone, |this| {
