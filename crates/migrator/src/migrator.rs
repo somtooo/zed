@@ -256,6 +256,7 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
         MigrationType::Json(migrations::m_2026_08_17::make_git_gutter_width_an_enum),
         MigrationType::Json(migrations::m_2026_08_26::rename_folder_icons_to_folder_indicator),
         MigrationType::Json(migrations::m_2026_08_30::nest_markdown_preview_settings),
+        MigrationType::Json(migrations::m_2026_09_11::make_expand_terminal_card_an_enum),
     ];
     run_migrations(text, migrations)
 }
@@ -5731,6 +5732,67 @@ mod tests {
                         "font_family": "Zed Sans",
                         "code_font_family": "Zed Mono",
                         "theme": "One Dark"
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_make_expand_terminal_card_an_enum() {
+        assert_migrate_with_migrations(
+            &[MigrationType::Json(
+                migrations::m_2026_09_11::make_expand_terminal_card_an_enum,
+            )],
+            &r#"
+            {
+                "agent": {
+                    "expand_terminal_card": true
+                },
+                "linux": {
+                    "agent": {
+                        "expand_terminal_card": false
+                    }
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "agent": {
+                        "expand_terminal_card": "always_expanded"
+                    },
+                    "linux": {
+                        "agent": {
+                            "expand_terminal_card": "always_collapsed"
+                        }
+                    }
+                }
+                "#
+                .unindent(),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_make_expand_terminal_card_an_enum_is_registered() {
+        assert_migrate_settings(
+            &r#"
+            {
+                "agent": {
+                    "expand_terminal_card": false
+                }
+            }
+            "#
+            .unindent(),
+            Some(
+                &r#"
+                {
+                    "agent": {
+                        "expand_terminal_card": "always_collapsed"
                     }
                 }
                 "#
