@@ -10139,6 +10139,122 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_selection_comment_queues_prose_into_draft(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let message_editor = message_editor(&conversation_view, cx);
+
+        let project = conversation_view.read_with(cx, |conversation_view, _cx| {
+            conversation_view.project.clone()
+        });
+        let workspace = conversation_view.read_with(cx, |conversation_view, _cx| {
+            conversation_view.workspace.upgrade().unwrap()
+        });
+        let buffer = project.update(cx, |project, cx| {
+            project.create_local_buffer("let a = 10 + 10;", None, false, cx)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let editor = cx.new(|cx| {
+                let mut editor =
+                    Editor::for_buffer(buffer.clone(), Some(project.clone()), window, cx);
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([MultiBufferOffset(8)..MultiBufferOffset(15)]);
+                });
+                editor
+            });
+            workspace.add_item_to_active_pane(Box::new(editor), None, false, window, cx);
+        });
+
+        let selection = workspace
+            .update(cx, |workspace, cx| {
+                AgentContextSource::from_active(workspace, cx)?.read_selection(workspace, false, cx)
+            })
+            .unwrap();
+
+        workspace.update_in(cx, |_workspace, window, cx| {
+            crate::selection_comments::queue_selection_comment(
+                &conversation_view,
+                selection,
+                "explain this".to_string(),
+                window,
+                cx,
+            );
+        });
+
+        message_editor.read_with(cx, |editor, cx| {
+            assert!(editor.text(cx).contains("explain this"));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_selection_comment_markers_clear_on_send(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation_view.clone(), cx);
+
+        let message_editor = message_editor(&conversation_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("review please", window, cx);
+        });
+
+        let (workspace, project) = conversation_view.read_with(cx, |conversation_view, _cx| {
+            (
+                conversation_view.workspace.clone(),
+                conversation_view.project.clone(),
+            )
+        });
+        let buffer = project.update(cx, |project, cx| {
+            project.create_local_buffer("let a = 10 + 10;", None, false, cx)
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let editor =
+                cx.new(|cx| Editor::for_buffer(buffer.clone(), Some(project.clone()), window, cx));
+            workspace.add_item_to_active_pane(Box::new(editor), None, false, window, cx);
+        })
+        .unwrap();
+
+        let overlay_editor = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace
+                    .active_item(cx)
+                    .and_then(|item| item.act_as::<Editor>(cx))
+                    .unwrap()
+            })
+            .unwrap();
+        overlay_editor.update_in(cx, |editor, window, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let range = snapshot.anchor_before(text::Point::new(0, 0))
+                ..snapshot.anchor_before(text::Point::new(0, 3));
+            editor.show_selection_comment(range, std::rc::Rc::new(|_, _, _| {}), true, window, cx);
+            let prompt = editor.selection_comment_prompt_editor().unwrap();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("stale marker", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+            editor.confirm_selection_comment(window, cx);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+        });
+
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        overlay_editor.read_with(cx, |editor, _cx| {
+            assert_eq!(editor.selection_comment_count(), 0);
+        });
+    }
+
+    #[gpui::test]
     async fn test_tool_permission_buttons_terminal_with_pattern(cx: &mut TestAppContext) {
         init_test(cx);
 
