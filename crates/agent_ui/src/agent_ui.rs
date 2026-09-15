@@ -1004,6 +1004,7 @@ mod tests {
             expand_edit_card: true,
             expand_terminal_card: settings::TerminalCardDisplay::AlwaysExpanded,
             terminal_init_command: None,
+            anchor_response_to_user_message: true,
             cancel_generation_on_terminal_stop: true,
             use_modifier_to_send: true,
             message_editor_min_lines: 1,
