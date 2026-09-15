@@ -33,8 +33,11 @@ use crate::unicode_confusables;
 
 use db::kvp::KeyValueStore;
 use gpui::List;
+use gpui::ScrollDelta;
+use gpui::ScrollWheelEvent;
 use gpui::Stateful;
 use gpui::TaskExt;
+use gpui::TouchPhase;
 use heapless::Vec as ArrayVec;
 use language_model::{
     FastModeConfirmation, LanguageModel, LanguageModelEffortLevel, LanguageModelId,
@@ -55,6 +58,7 @@ use super::elicitation::{
 use super::*;
 
 const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
+const PIXELS_PER_USER_MESSAGE_SCROLL: f32 = 40.0;
 
 #[derive(Default)]
 struct ThreadFeedbackState {
@@ -591,6 +595,7 @@ pub struct ThreadView {
     pub last_token_limit_telemetry: Option<acp_thread::TokenUsageRatio>,
     thread_feedback: ThreadFeedbackState,
     pub list_state: ListState,
+    user_message_scroll_delta: f32,
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
@@ -1010,6 +1015,7 @@ impl ThreadView {
             token_limit_callout_dismissed: false,
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
+            user_message_scroll_delta: 0.0,
             expanded_tool_call_raw_inputs: HashSet::default(),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
@@ -1712,7 +1718,12 @@ impl ThreadView {
             })?;
 
             let _ = this.update(cx, |this, cx| {
-                this.list_state.scroll_to_end();
+                if AgentSettings::get_global(cx).anchor_response_to_user_message {
+                    this.list_state.set_follow_mode(gpui::FollowMode::Normal);
+                } else {
+                    this.list_state.set_follow_mode(gpui::FollowMode::Tail);
+                    this.list_state.scroll_to_end();
+                }
                 cx.notify();
             });
 
@@ -6149,12 +6160,16 @@ impl ThreadView {
                 let entries = this.thread.read(cx).entries();
                 if let Some(entry) = entries.get(index) {
                     let rendered = this.render_entry(index, entries.len(), entry, window, cx);
-                    centered_container(rendered.into_any_element()).into_any_element()
+                    centered_container(rendered.into_any_element())
+                        .on_scroll_wheel(cx.listener(Self::handle_user_message_scroll))
+                        .into_any_element()
                 } else if this.generating_indicator_in_list {
                     let confirmation = this.thread.read(cx).is_waiting_for_confirmation()
                         || this.has_pending_request_elicitation(cx);
                     let rendered = this.render_generating(confirmation, cx);
-                    centered_container(rendered.into_any_element()).into_any_element()
+                    centered_container(rendered.into_any_element())
+                        .on_scroll_wheel(cx.listener(Self::handle_user_message_scroll))
+                        .into_any_element()
                 } else {
                     Empty.into_any()
                 }
@@ -7148,6 +7163,10 @@ impl ThreadView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.scroll_to_previous_user_message(cx);
+    }
+
+    fn scroll_to_previous_user_message(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.thread.read(cx).entries();
         let current_ix = self.list_state.logical_scroll_top().item_ix;
         if let Some(target_ix) = (0..current_ix)
@@ -7159,6 +7178,9 @@ impl ThreadView {
                 offset_in_item: px(0.),
             });
             cx.notify();
+            true
+        } else {
+            false
         }
     }
 
@@ -7168,6 +7190,10 @@ impl ThreadView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.scroll_to_next_user_message(cx);
+    }
+
+    fn scroll_to_next_user_message(&mut self, cx: &mut Context<Self>) -> bool {
         let entries = self.thread.read(cx).entries();
         let current_ix = self.list_state.logical_scroll_top().item_ix;
         if let Some(target_ix) = (current_ix + 1..entries.len())
@@ -7178,6 +7204,71 @@ impl ThreadView {
                 offset_in_item: px(0.),
             });
             cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn handle_user_message_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.modifiers.alt {
+            self.user_message_scroll_delta = 0.0;
+            return;
+        }
+
+        if matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+            self.user_message_scroll_delta = 0.0;
+            return;
+        }
+        if event.touch_phase == TouchPhase::Started {
+            self.user_message_scroll_delta = 0.0;
+        }
+
+        let steps = match event.delta {
+            ScrollDelta::Lines(lines) => {
+                self.user_message_scroll_delta = 0.0;
+                lines.y.signum() as i32
+            }
+            ScrollDelta::Pixels(pixels) => {
+                let delta = f32::from(pixels.y);
+                if self.user_message_scroll_delta != 0.0
+                    && self.user_message_scroll_delta.signum() != delta.signum()
+                {
+                    self.user_message_scroll_delta = 0.0;
+                }
+                self.user_message_scroll_delta += delta;
+                let steps = (self.user_message_scroll_delta / PIXELS_PER_USER_MESSAGE_SCROLL)
+                    .trunc() as i32;
+                self.user_message_scroll_delta -= steps as f32 * PIXELS_PER_USER_MESSAGE_SCROLL;
+                steps
+            }
+        };
+
+        if steps > 0 {
+            for _ in 0..steps {
+                if !self.scroll_to_previous_user_message(cx) {
+                    break;
+                }
+            }
+        } else {
+            for _ in steps..0 {
+                if !self.scroll_to_next_user_message(cx) {
+                    break;
+                }
+            }
+        }
+
+        let has_vertical_delta = match event.delta {
+            ScrollDelta::Pixels(pixels) => pixels.y != px(0.),
+            ScrollDelta::Lines(lines) => lines.y != 0.0,
+        };
+        if has_vertical_delta {
+            cx.stop_propagation();
         }
     }
 

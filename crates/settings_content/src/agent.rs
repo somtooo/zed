@@ -455,6 +455,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: automatic
     pub thinking_display: Option<ThinkingBlockDisplay>,
+    /// Whether to position each new user message at the top of the agent conversation and keep
+    /// the viewport fixed while the response streams.
+    ///
+    /// Default: true
+    pub anchor_response_to_user_message: Option<bool>,
     /// Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
     /// Note that this only applies to the stop button, not to ctrl+c inside the terminal.
     ///
