@@ -611,6 +611,7 @@ mod tests {
             sidebar_side: Default::default(),
             threads_sidebar_default_width: px(300.),
             thinking_display: Default::default(),
+            anchor_response_to_user_message: true,
         }
     }
 
