@@ -1294,7 +1294,12 @@ impl ConversationView {
 
         let count = thread.read(cx).entries().len();
         let list_state = ListState::new(0, gpui::ListAlignment::Top, px(2048.0));
-        list_state.set_follow_mode(gpui::FollowMode::Tail);
+        let follow_mode = if AgentSettings::get_global(cx).anchor_response_to_user_message {
+            gpui::FollowMode::Normal
+        } else {
+            gpui::FollowMode::Tail
+        };
+        list_state.set_follow_mode(follow_mode);
 
         entry_view_state.update(cx, |view_state, cx| {
             for ix in 0..count {
@@ -1621,6 +1626,12 @@ impl ConversationView {
             AcpThreadEvent::NewEntry => {
                 let len = thread.read(cx).entries().len();
                 let index = len - 1;
+                let should_anchor_to_user_message = AgentSettings::get_global(cx)
+                    .anchor_response_to_user_message
+                    && matches!(
+                        thread.read(cx).entries().get(index),
+                        Some(AgentThreadEntry::UserMessage(_))
+                    );
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
                     let list_state = active.read(cx).list_state.clone();
@@ -1637,6 +1648,9 @@ impl ConversationView {
                         active.sync_elicitation_state_for_entry(index, window, cx);
                         active.sync_editor_mode(cx);
                         active.sync_generating_indicator(cx);
+                        if should_anchor_to_user_message {
+                            active.scroll_to_user_message_index(Some(index), cx);
+                        }
                     });
                 }
             }
@@ -7082,6 +7096,157 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_response_stays_anchored_to_latest_user_message(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Prompt 1", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        let session_id = active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 0);
+            assert!(!view.list_state.is_following_tail());
+            view.thread.read(cx).session_id().clone()
+        });
+
+        cx.update(|_, cx| {
+            connection.send_update(
+                session_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("Response".into())),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        active_thread(&conversation_view, cx).update(cx, |view, _cx| {
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 0);
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 1,
+                offset_in_item: px(0.),
+            });
+        });
+
+        cx.update(|_, cx| {
+            connection.send_update(
+                session_id.clone(),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(" continues".into())),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        active_thread(&conversation_view, cx).read_with(cx, |view, _cx| {
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 1);
+        });
+
+        connection.end_turn(session_id.clone(), acp::StopReason::EndTurn);
+        cx.run_until_parked();
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Prompt 2", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        active_thread(&conversation_view, cx).read_with(cx, |view, _cx| {
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+            assert!(!view.list_state.is_following_tail());
+        });
+
+        connection.end_turn(session_id, acp::StopReason::EndTurn);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_alt_scroll_navigates_between_user_messages(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        let thread =
+            active_thread(&conversation_view, cx).read_with(cx, |view, _cx| view.thread.clone());
+
+        for (prompt, response) in [
+            ("Prompt 1", "Response 1"),
+            ("Prompt 2", "Response 2"),
+            ("Prompt 3", "Response 3"),
+        ] {
+            connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+                acp::ContentChunk::new(response.into()),
+            )]);
+            thread
+                .update(cx, |thread, cx| thread.send_raw(prompt, cx))
+                .await
+                .expect("sending the prompt should succeed");
+            cx.run_until_parked();
+        }
+
+        let thread_view = active_thread(&conversation_view, cx);
+        thread_view.update_in(cx, |view, window, cx| {
+            let alt_line_scroll = |vertical_delta| gpui::ScrollWheelEvent {
+                delta: gpui::ScrollDelta::Lines(point(0.0, vertical_delta)),
+                modifiers: gpui::Modifiers::alt(),
+                ..Default::default()
+            };
+            let alt_pixel_scroll = |vertical_delta| gpui::ScrollWheelEvent {
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(vertical_delta))),
+                modifiers: gpui::Modifiers::alt(),
+                ..Default::default()
+            };
+
+            view.list_state.scroll_to(ListOffset {
+                item_ix: 2,
+                offset_in_item: px(0.),
+            });
+
+            view.handle_user_message_scroll(&alt_line_scroll(1.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 0);
+
+            view.handle_user_message_scroll(&alt_line_scroll(-1.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+
+            view.handle_user_message_scroll(&alt_pixel_scroll(20.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+
+            view.handle_user_message_scroll(&alt_pixel_scroll(-20.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+
+            view.handle_user_message_scroll(&alt_pixel_scroll(20.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+
+            view.handle_user_message_scroll(&alt_pixel_scroll(20.0), window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 0);
+
+            let alt_scroll_down = alt_line_scroll(-1.0);
+            view.handle_user_message_scroll(&alt_scroll_down, window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 2);
+            view.handle_user_message_scroll(&alt_scroll_down, window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 4);
+            view.handle_user_message_scroll(&alt_scroll_down, window, cx);
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 4);
+
+            view.handle_user_message_scroll(
+                &gpui::ScrollWheelEvent {
+                    delta: gpui::ScrollDelta::Lines(point(0.0, 1.0)),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert_eq!(view.list_state.logical_scroll_top().item_ix, 4);
+        });
+    }
+
+    #[gpui::test]
     async fn test_scroll_to_most_recent_user_prompt(cx: &mut TestAppContext) {
         init_test(cx);
 
@@ -8641,6 +8806,15 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
+        cx.update(|cx| {
+            AgentSettings::override_global(
+                AgentSettings {
+                    anchor_response_to_user_message: false,
+                    ..AgentSettings::get_global(cx).clone()
+                },
+                cx,
+            );
+        });
 
         let connection = StubAgentConnection::new();
 
