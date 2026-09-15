@@ -46545,3 +46545,343 @@ fn document_highlight_count(cx: &mut EditorLspTestContext) -> usize {
             .map_or(0, |(_, ranges)| ranges.len())
     })
 }
+
+fn selection_comment_range(editor: &Editor, start: Point, end: Point, cx: &App) -> Range<Anchor> {
+    let snapshot = editor.buffer().read(cx).snapshot(cx);
+    snapshot.anchor_before(start)..snapshot.anchor_before(end)
+}
+
+fn confirm_recorder() -> (SelectionCommentCallback, Rc<RefCell<Vec<String>>>) {
+    let confirmed = Rc::new(RefCell::new(Vec::new()));
+    let callback_confirmed = confirmed.clone();
+    let callback: SelectionCommentCallback = Rc::new(
+        move |comment_text: String, _window: &mut Window, _cx: &mut App| {
+            callback_confirmed.borrow_mut().push(comment_text);
+        },
+    );
+    (callback, confirmed)
+}
+
+#[gpui::test]
+fn test_selection_comment_show_confirm_keeps_marker(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+        })
+        .unwrap();
+
+    // Showing the same range again focuses the existing input instead of duplicating it.
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+        })
+        .unwrap();
+
+    // A different range opens a second block.
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 6), Point::new(0, 11), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 2);
+        })
+        .unwrap();
+
+    // Confirming with empty text queues nothing and leaves the input open.
+    editor
+        .update(cx, |editor, window, cx| {
+            editor.confirm_selection_comment(window, cx);
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+            assert!(confirmed.borrow().is_empty());
+        })
+        .unwrap();
+
+    // Typing a comment and confirming queues it but keeps the marker.
+    editor
+        .update(cx, |editor, window, cx| {
+            let prompt = editor
+                .selection_comment_overlays
+                .iter()
+                .find(|overlay| !overlay.confirmed)
+                .map(|overlay| overlay.prompt_editor.clone())
+                .unwrap();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("rename this", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+            editor.confirm_selection_comment(window, cx);
+        })
+        .unwrap();
+
+    editor
+        .update(cx, |editor, _window, _cx| {
+            assert_eq!(editor.selection_comment_count(), 2);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+            assert_eq!(confirmed.borrow().len(), 1);
+            assert_eq!(confirmed.borrow()[0], "rename this");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_cancel_and_dismiss(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, confirmed) = confirm_recorder();
+
+    // Esc through dismiss_menus_and_popups removes only the focused unconfirmed block.
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            editor.dismiss_menus_and_popups(true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 0);
+            assert!(confirmed.borrow().is_empty());
+        })
+        .unwrap();
+
+    // A confirmed marker survives dismissals.
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            let prompt = editor.selection_comment_overlays[0].prompt_editor.clone();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("keep me", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+            editor.confirm_selection_comment(window, cx);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+            editor.dismiss_menus_and_popups(true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_edit_delete_clear(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, _confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            let prompt = editor.selection_comment_overlays[0].prompt_editor.clone();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("first", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+            editor.confirm_selection_comment(window, cx);
+            let overlay_id = editor.selection_comment_overlays[0].id;
+
+            assert!(editor.edit_selection_comment(overlay_id, window, cx));
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+
+            assert!(editor.delete_selection_comment(overlay_id, cx));
+            assert_eq!(editor.selection_comment_count(), 0);
+            assert!(!editor.delete_selection_comment(overlay_id, cx));
+        })
+        .unwrap();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let first = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(first, callback.clone(), true, window, cx);
+            editor.cancel_focused_selection_comment(window, cx);
+            let second = selection_comment_range(editor, Point::new(0, 6), Point::new(0, 11), cx);
+            editor.show_selection_comment(second, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            editor.clear_selection_comments(cx);
+            assert_eq!(editor.selection_comment_count(), 0);
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_empty_selection_expands_to_line(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, _confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let cursor = selection_comment_range(editor, Point::new(0, 3), Point::new(0, 3), cx);
+            editor.show_selection_comment(cursor, callback, true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let overlay_range = editor.selection_comment_overlays[0].anchor_range.clone();
+            assert_eq!(overlay_range.start.to_point(&snapshot), Point::new(0, 0));
+            assert_eq!(overlay_range.end.to_point(&snapshot), Point::new(0, 11));
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_reinvoke_reopens_for_edit(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range.clone(), callback.clone(), true, window, cx);
+            let prompt = editor.selection_comment_overlays[0].prompt_editor.clone();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("original", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+            editor.confirm_selection_comment(window, cx);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+
+            // Invoking on the same range reopens the confirmed marker for
+            // editing instead of stacking a duplicate.
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+            assert_eq!(confirmed.borrow().len(), 1);
+            let restored = editor.selection_comment_overlays[0]
+                .prompt_editor
+                .read(cx)
+                .text(cx);
+            assert_eq!(restored, "original");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_reinvoke_keeps_unconfirmed_draft(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range.clone(), callback.clone(), true, window, cx);
+            let prompt = editor.selection_comment_overlays[0].prompt_editor.clone();
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("half written", window, cx);
+            });
+            window.focus(&prompt.focus_handle(cx), cx);
+
+            // Re-invoking while still drafting focuses the same input and
+            // must not wipe the typed text.
+            editor.show_selection_comment(range, callback.clone(), true, window, cx);
+            assert_eq!(editor.selection_comment_count(), 1);
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+            assert!(confirmed.borrow().is_empty());
+            let draft = editor.selection_comment_overlays[0]
+                .prompt_editor
+                .read(cx)
+                .text(cx);
+            assert_eq!(draft, "half written");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_multiline_input(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello world", window, cx);
+        editor
+    });
+
+    let (callback, confirmed) = confirm_recorder();
+
+    editor
+        .update(cx, |editor, window, cx| {
+            let range = selection_comment_range(editor, Point::new(0, 0), Point::new(0, 5), cx);
+            editor.show_selection_comment(range, callback, true, window, cx);
+            let prompt = editor.selection_comment_overlays[0].prompt_editor.clone();
+            window.focus(&prompt.focus_handle(cx), cx);
+            prompt.update(cx, |prompt, cx| {
+                prompt.set_text("first line\nsecond line", window, cx);
+            });
+            assert_eq!(editor.confirmed_selection_comment_count(), 0);
+
+            // Confirming through the focus-based path exercises the same
+            // logic the prompt entity's ConfirmSelectionComment handler runs
+            // for the Cmd+Enter keybinding. Keymap wiring itself is covered
+            // by the scoped selection_comment_input context, which headless
+            // tests cannot dispatch through without a rendered tree.
+            editor.confirm_selection_comment(window, cx);
+            assert_eq!(editor.confirmed_selection_comment_count(), 1);
+            assert_eq!(confirmed.borrow()[0], "first line\nsecond line");
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn test_selection_comment_blank_line_queues_nothing(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let editor = cx.add_window(|window, cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_text("hello\n\nworld", window, cx);
+        editor
+    });
+
+    editor
+        .update(cx, |editor, _window, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let blank =
+                snapshot.anchor_before(Point::new(1, 0))..snapshot.anchor_before(Point::new(1, 0));
+            assert!(editor.selection_comment_queue_ranges(&blank, cx).is_empty());
+            let word =
+                snapshot.anchor_before(Point::new(0, 0))..snapshot.anchor_before(Point::new(0, 5));
+            assert_eq!(editor.selection_comment_queue_ranges(&word, cx).len(), 1);
+        })
+        .unwrap();
+}
