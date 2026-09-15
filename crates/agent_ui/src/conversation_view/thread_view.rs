@@ -1892,6 +1892,11 @@ impl ThreadView {
                 message_editor.update(cx, |message_editor, cx| {
                     message_editor.clear(window, cx);
                 });
+                if let Some(thread_view) = this.upgrade() {
+                    thread_view.update(cx, |thread_view, cx| {
+                        thread_view.clear_selection_comment_markers(cx);
+                    });
+                }
             })?;
 
             // Strip the leading `/command` from the first text block; whatever
@@ -1951,7 +1956,7 @@ impl ThreadView {
                 .ok();
         }
 
-        let contents_task = cx.spawn_in(window, async move |_this, cx| {
+        let contents_task = cx.spawn_in(window, async move |this, cx| {
             let (contents, tracked_buffers) = contents.await?;
 
             if contents.is_empty() {
@@ -1962,6 +1967,11 @@ impl ThreadView {
                 message_editor.update(cx, |message_editor, cx| {
                     message_editor.clear(window, cx);
                 });
+                if let Some(thread_view) = this.upgrade() {
+                    thread_view.update(cx, |thread_view, cx| {
+                        thread_view.clear_selection_comment_markers(cx);
+                    });
+                }
             });
 
             Ok(Some((contents, tracked_buffers)))
@@ -2432,6 +2442,12 @@ impl ThreadView {
 
     // message queueing
 
+    fn clear_selection_comment_markers(&self, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspace.upgrade() {
+            crate::selection_comments::clear_all_selection_comment_blocks(&workspace, cx);
+        }
+    }
+
     fn queue_message(
         &mut self,
         message_editor: Entity<MessageEditor>,
@@ -2459,6 +2475,7 @@ impl ThreadView {
                 message_editor.update(cx, |message_editor, cx| {
                     message_editor.clear(window, cx);
                 });
+                this.clear_selection_comment_markers(cx);
                 cx.notify();
             })?;
             Ok(())
