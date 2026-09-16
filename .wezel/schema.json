@@ -165,7 +165,7 @@
               {
                 "properties": {
                   "outcome": {
-                    "description": "**`time_ms`** — cargo's own reported build duration (the `Finished … in <t>` line), in milliseconds. Excludes process startup and dependency resolution.",
+                    "description": "**`time_ms`** — how long `cargo <command>` took, in milliseconds.",
                     "type": "string"
                   }
                 }
@@ -192,6 +192,56 @@
         "command"
       ],
       "type": "object"
+    },
+    "Step_filesize": {
+      "additionalProperties": false,
+      "description": "Body of a `[step.<tool>.<step_name>]` table. The tool name is recovered from the outer key, not a field; flatten-collected `rest` is forwarded to the forager plugin via `FORAGER_INPUTS` as JSON.",
+      "properties": {
+        "apply-diff": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DiffField"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Apply a patch before running this step. `true` uses `<step name>.patch`; a string overrides the filename."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "glob": {
+          "description": "Glob pattern, evaluated against the experiment workspace cwd.",
+          "type": "string"
+        },
+        "summary": {
+          "additionalProperties": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/EmbeddedSummaryToml"
+              },
+              {
+                "properties": {
+                  "outcome": {
+                    "description": "One outcome per matched file. The outcome name is the file's path (relative to cwd); the value is its size in bytes.",
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "description": "Summaries emitted by this step, keyed by summary name.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "glob"
+      ],
+      "type": "object"
     }
   },
   "description": "Top-level shape of `.wezel/experiments/<name>/experiment.toml`.\n\nSteps live under `[step.<tool>.<step_name>]`. The outer map is keyed by tool name and the inner by step name; bodies are wrapped in `toml::Spanned` so the parser can recover file-line order across reopened tables.",
@@ -211,7 +261,14 @@
           "additionalProperties": {
             "$ref": "#/definitions/Step_cargo"
           },
-          "description": "Runs `cargo <command>` and records the build time cargo reports",
+          "description": "Runs `cargo <command>` and records wall-clock time",
+          "type": "object"
+        },
+        "filesize": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Step_filesize"
+          },
+          "description": "Reports byte size of every file matching a glob",
           "type": "object"
         }
       },

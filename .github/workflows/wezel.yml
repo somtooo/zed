@@ -1,0 +1,109 @@
+# Generated from xtask::workflows::wezel
+# Rebuild with `cargo xtask workflows`.
+name: wezel
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: run_id
+        required: true
+        type: string
+      experiment_name:
+        description: experiment_name
+        required: true
+        type: string
+      commit_sha:
+        description: commit_sha
+        required: true
+        type: string
+      project_dir:
+        description: project_dir
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  macos:
+    if: github.repository == 'zed-industries/zed' && inputs.project_dir == '.' && inputs.experiment_name == 'release-binary-size-macos'
+    runs-on: namespace-profile-mac-large
+    permissions:
+      contents: read
+    env:
+      ASSIGNED_COMMIT: ${{ inputs.commit_sha }}
+      CARGO_TARGET_DIR: target
+    steps:
+    - name: Validate assigned commit
+      run: '[[ "$ASSIGNED_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+        ref: ${{ inputs.commit_sha }}
+        persist-credentials: false
+    - name: Verify assigned checkout
+      run: test "$(git rev-parse HEAD)" = "$ASSIGNED_COMMIT"
+    - name: steps::cache_rust_dependencies_namespace
+      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      with:
+        cache: rust
+        path: ~/.rustup
+    - name: steps::download_wasi_sdk
+      run: ./script/download-wasi-sdk
+    - name: Ensure zstd is available
+      run: command -v zstd || brew install --force-bottle zstd
+    - name: Run assigned Wezel experiment
+      uses: wezel-build/gh-action@384b808f1de753a22abfadfe932452d0166c316f
+      with:
+        wezel-version: v0.1.5-pre-pre.20260916103109+5a021a6
+        token: ${{ secrets.WEZEL_RUNNER_TOKEN }}
+        run-id: ${{ inputs.run_id }}
+        experiment-name: ${{ inputs.experiment_name }}
+        project-dir: ${{ inputs.project_dir }}
+    timeout-minutes: 60
+  linux:
+    if: github.repository == 'zed-industries/zed' && inputs.project_dir == '.' && inputs.experiment_name == 'release-binary-size-linux'
+    runs-on: namespace-profile-16x32-ubuntu-2204
+    permissions:
+      contents: read
+    env:
+      ASSIGNED_COMMIT: ${{ inputs.commit_sha }}
+      CARGO_TARGET_DIR: target
+      CC: clang
+      CXX: clang++
+    steps:
+    - name: Validate assigned commit
+      run: '[[ "$ASSIGNED_COMMIT" =~ ^[0-9a-f]{40}$ ]]'
+    - name: steps::checkout_repo
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      with:
+        clean: false
+        ref: ${{ inputs.commit_sha }}
+        persist-credentials: false
+    - name: Verify assigned checkout
+      run: test "$(git rev-parse HEAD)" = "$ASSIGNED_COMMIT"
+    - name: steps::cache_rust_dependencies_namespace
+      uses: namespacelabs/nscloud-cache-action@a90bb5d4b27522ce881c6e98eebd7d7e6d1653f9
+      with:
+        cache: rust
+        path: ~/.rustup
+    - name: steps::setup_linux
+      run: ./script/linux
+    - name: steps::download_wasi_sdk
+      run: ./script/download-wasi-sdk
+    - name: Ensure zstd is available
+      run: command -v zstd || sudo apt-get install -y zstd
+    - name: Run assigned Wezel experiment
+      uses: wezel-build/gh-action@384b808f1de753a22abfadfe932452d0166c316f
+      with:
+        wezel-version: v0.1.5-pre-pre.20260916103109+5a021a6
+        token: ${{ secrets.WEZEL_RUNNER_TOKEN }}
+        run-id: ${{ inputs.run_id }}
+        experiment-name: ${{ inputs.experiment_name }}
+        project-dir: ${{ inputs.project_dir }}
+    timeout-minutes: 60
+concurrency:
+  group: wezel-run-${{ inputs.run_id }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}

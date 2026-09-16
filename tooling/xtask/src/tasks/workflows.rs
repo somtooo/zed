@@ -31,6 +31,7 @@ mod run_tests;
 mod runners;
 mod steps;
 mod vars;
+mod wezel;
 
 #[derive(Clone)]
 pub(crate) struct GitSha(String);
@@ -240,6 +241,7 @@ pub fn run_workflows(args: GenerateWorkflowArgs) -> Result<()> {
         WorkflowFile::zed(release_nightly::release_nightly),
         WorkflowFile::zed(run_bundling::run_bundling),
         WorkflowFile::zed(run_tests::run_tests),
+        WorkflowFile::zed(wezel::wezel),
         /* workflows used for CI/CD in extension repositories */
         WorkflowFile::extension(extensions::run_tests::run_tests),
         WorkflowFile::extension_shared(extensions::bump_version::bump_version),

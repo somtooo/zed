@@ -1,0 +1,11 @@
+description = "Measures the unbundled macOS release executable size"
+
+[step.cargo.build]
+command = "build"
+build_target = ["zed"]
+bins = ["zed"]
+profile = "release"
+
+[step.filesize.measure-binary-size]
+glob = "target/release/zed"
+summary.binary-size = { outcome = "target/release/zed", bisect = true }

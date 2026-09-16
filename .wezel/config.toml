@@ -11,3 +11,6 @@ targets = [
 
 [tools.foragers.cargo]
 github = "wezel-build/forager_cargo"
+
+[tools.foragers.filesize]
+github = "wezel-build/wezel_filesize"
