@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# Keep this fork's main up to date with upstream (zed-industries/zed).
+#
+# Strategy (per https://github.com/orgs/community/discussions/153608):
+#   fetch upstream, then MERGE upstream/main (not rebase, not `gh repo sync`).
+#   `gh repo sync` only fast-forwards, so it fails once main carries custom
+#   commits -- merge preserves fork history and is trivial to abort.
+#
+# Fully automated: on a clean merge it pushes the sync branch and opens a PR.
+# On conflict it calls opencode headlessly (Muse Spark 1.3, xhigh reasoning)
+# to resolve, verifies the resolution, then pushes and opens a PR the same way.
+# Opening the PR triggers the fork-checks workflow (clippy + nextest workspace
+# + doctests) on Actions free compute -- merge the PR only when green.
+#
+# Usage:
+#   script/fork-sync [--no-push] [--no-ai] [--branch <name>]
+#                    [--upstream <remote>] [--model <m>] [--variant <v>]
+#
+#   --no-push         leave the sync branch local (no push, no PR)
+#   --no-ai           don't call opencode; abort on conflict for manual fix
+#   --branch <name>   sync branch to use (default: sync/upstream-YYYYMMDD)
+#   --upstream <name> upstream remote name (default: upstream)
+#   --model <m>       opencode model (default: opencode/muse-spark-1.3-contributor-free)
+#   --variant <v>     model reasoning variant (default: xhigh)
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+PUSH=true
+AI=true
+BRANCH="sync/upstream-$(date +%Y%m%d)"
+UPSTREAM="upstream"
+MODEL="opencode/muse-spark-1.3-contributor-free"
+VARIANT="xhigh"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-push)
+            PUSH=false
+            shift
+            ;;
+        --no-ai)
+            AI=false
+            shift
+            ;;
+        --branch)
+            BRANCH="$2"
+            shift 2
+            ;;
+        --upstream)
+            UPSTREAM="$2"
+            shift 2
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --variant)
+            VARIANT="$2"
+            shift 2
+            ;;
+        -h | --help)
+            echo "Usage: script/fork-sync [--no-push] [--no-ai] [--branch <name>] [--upstream <remote>] [--model <m>] [--variant <v>]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1 (see --help)" >&2
+            exit 1
+            ;;
+    esac
+done
+
+command -v gh >/dev/null 2>&1 || {
+    echo "error: gh CLI required (push + PR creation)" >&2
+    exit 1
+}
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "error: working tree is dirty -- commit or stash first" >&2
+    exit 1
+fi
+
+if ! git remote get-url "$UPSTREAM" >/dev/null 2>&1; then
+    echo "error: no '$UPSTREAM' remote -- add it with:" >&2
+    echo "  git remote add upstream https://github.com/zed-industries/zed.git" >&2
+    exit 1
+fi
+
+git fetch "$UPSTREAM"
+git fetch origin
+
+if ! git show-ref --verify --quiet refs/heads/main; then
+    echo "error: no local main branch" >&2
+    exit 1
+fi
+
+BEHIND=$(git rev-list --count main.."$UPSTREAM"/main)
+AHEAD=$(git rev-list --count "$UPSTREAM"/main..main)
+echo "main is $AHEAD ahead / $BEHIND behind $UPSTREAM/main"
+
+if [ "$BEHIND" -eq 0 ]; then
+    echo "Already up to date -- nothing to do."
+    exit 0
+fi
+
+if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git checkout "$BRANCH"
+    git reset --hard main
+else
+    git checkout -b "$BRANCH" main
+fi
+
+AI_RESOLVED=false
+
+echo "Merging $UPSTREAM/main into $BRANCH ..."
+if git merge --no-edit "$UPSTREAM"/main; then
+    echo "Merge clean."
+else
+    CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+    echo "Conflicted files:"
+    echo "$CONFLICTS"
+    if [ "$AI" = false ]; then
+        git merge --abort
+        git checkout main
+        echo "Aborted (--no-ai). Resolve manually, then re-run." >&2
+        exit 1
+    fi
+    command -v opencode >/dev/null 2>&1 || {
+        git merge --abort
+        git checkout main
+        echo "error: opencode CLI not found -- install it or re-run with --no-ai" >&2
+        exit 1
+    }
+    echo "Resolving with opencode ($MODEL, variant $VARIANT) ..."
+    if ! opencode run -m "$MODEL" --variant "$VARIANT" "You are resolving a git merge conflict in this repo. Context: this is a fork of zed-industries/zed. Our branch $BRANCH (currently checked out, holding our custom fork features) has just merged $UPSTREAM/main, and these files now contain git conflict markers: $CONFLICTS.
+
+Our fork features you must PRESERVE (never delete to 'resolve' a conflict):
+- markdown theme syntax colors (crates/markdown)
+- selection comments queued into the agent thread draft (crates/editor/src/selection_comments.rs, crates/agent_ui/src/selection_comments.rs)
+- automatic terminal card collapse (crates/agent_ui thread_view/entry_view_state)
+- anchored agent responses with Alt-scroll navigation (crates/agent_ui conversation_view)
+
+How to resolve each file:
+1. Inspect every conflict hunk (grep -n '^<<<<<<< \|^=======$\|^>>>>>>> ' in each file). Use 'git log --merge --oneline -p -- <file>' plus 'git show :2:<file>' (OURS, our features) and 'git show :3:<file>' (THEIRS, upstream) to understand what each side intended.
+2. Merge SEMANTICALLY: when both sides added code at the same spot (e.g. both appended tests to the same file), KEEP BOTH, in a sensible order, fixing up any resulting duplicate or ordering issues. When upstream refactored code our feature touches, adapt our feature to the new upstream shape -- do not revert the refactor and do not drop our feature.
+3. Follow this repo's Rust rules (AGENTS.md): no unwrap()/expect() in new code, propagate errors with ?, handle fallible results explicitly, full-word variable names, and keep diffs minimal -- no drive-by reformatting.
+4. Remove ALL conflict markers. After editing each file, stage it with 'git add <file>'. Do NOT commit -- the script commits after verifying.
+5. When all files are staged, run 'git diff --check' (must be clean) and 'git status --short' (no U entries, no markers left: verify with rg -n '^<{7} |^={7}$\|^>{7} ' on the touched files).
+6. If a hunk is genuinely ambiguous and both readings are defensible, prefer keeping upstream behavior and note the choice in your final summary.
+
+Final summary must list: each file, what each side changed, and how you reconciled it."; then
+        git merge --abort
+        git checkout main
+        echo "error: opencode run failed -- merge aborted, on main." >&2
+        exit 1
+    fi
+    if [ -n "$(git diff --name-only --diff-filter=U || true)" ]; then
+        git merge --abort
+        git checkout main
+        echo "error: conflicts remain after opencode -- merge aborted, on main." >&2
+        echo "Re-run with --no-ai and resolve manually." >&2
+        exit 1
+    fi
+    if ! git diff --check; then
+        git merge --abort
+        git checkout main
+        echo "error: whitespace/marker issues after opencode -- merge aborted, on main." >&2
+        exit 1
+    fi
+    git commit --no-edit
+    AI_RESOLVED=true
+    echo "AI resolution committed: $(git rev-parse --short HEAD)"
+fi
+
+git log --oneline -5
+
+if [ "$PUSH" = false ]; then
+    echo "Leaving $BRANCH local (--no-push). Push + PR when ready:"
+    echo "  git push -u origin $BRANCH"
+    exit 0
+fi
+
+git push -u origin "$BRANCH"
+
+EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+if [ -n "$EXISTING_PR" ]; then
+    echo "PR already exists: $(gh pr view "$EXISTING_PR" --json url --jq .url)"
+    exit 0
+fi
+
+if [ "$AI_RESOLVED" = true ]; then
+    PR_TITLE="chore(sync): merge upstream/main (AI-resolved conflicts)"
+    PR_BODY="Upstream sync with conflicts auto-resolved by opencode ($MODEL, variant $VARIANT). Review the merge commit carefully; fork-checks runs the full gate (clippy + nextest workspace + doctests). Merge only when green."
+else
+    PR_TITLE="chore(sync): merge upstream/main"
+    PR_BODY="Clean upstream sync, no conflicts. fork-checks runs the full gate (clippy + nextest workspace + doctests). Merge when green."
+fi
+
+gh pr create --base main --head "$BRANCH" --title "$PR_TITLE" --body "$PR_BODY"
