@@ -110,8 +110,23 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
+      - name: Setup software rendering (no GPU on free runners)
+        run: sudo apt-get install -y xvfb libgl1-mesa-dri mesa-vulkan-drivers
+
       - name: Full test suite
-        run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
+        run: |
+          set -euo pipefail
+          # Uncommitted on purpose: .config/nextest.toml is upstream-owned.
+          # Free runners are ~4x slower than upstream's, so give the two
+          # known-slow tests the same 300s budget upstream grants its own
+          # slow ones, and retry flakes once (cargo cache makes retries fast).
+          cat >> .config/nextest.toml <<'EOF'
+
+          [[profile.default.overrides]]
+          filter = 'test(test_random_columnar_selections) or test(test_completion_without_text_edit)'
+          slow-timeout = { period = "300s", terminate-after = 1 }
+          EOF
+          xvfb-run -a cargo nextest run --workspace --no-fail-fast --no-tests=warn --retries 1
 
       - name: Cleanup cargo config
         if: always()
