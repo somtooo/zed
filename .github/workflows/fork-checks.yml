@@ -123,7 +123,7 @@ jobs:
           cat >> .config/nextest.toml <<'EOF'
 
           [[profile.default.overrides]]
-          filter = 'test(test_random_columnar_selections) or test(test_completion_without_text_edit)'
+          filter = 'test(test_random_columnar_selections) or test(test_completion_without_text_edit) or test(test_random_worktree_changes)'
           slow-timeout = { period = "300s", terminate-after = 1 }
           EOF
           xvfb-run -a cargo nextest run --workspace --no-fail-fast --no-tests=warn --retries 1
