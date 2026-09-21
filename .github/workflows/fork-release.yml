@@ -162,6 +162,13 @@ jobs:
       - name: Download WASI SDK
         run: ./script/download-wasi-sdk
 
+      - name: Select newest Xcode (WebRTC needs a current toolchain)
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Using $LATEST_XCODE"
+          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          xcodebuild -version
+
       - name: Bundle macOS release (unsigned)
         run: ./script/bundle-mac aarch64-apple-darwin
 
