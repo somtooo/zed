@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: write
+  # Merges from upstream touch workflow files, which GITHUB_TOKEN
+  # refuses to push without this scope.
+  workflows: write
 
 concurrency:
   group: fork-sync

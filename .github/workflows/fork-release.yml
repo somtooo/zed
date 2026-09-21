@@ -90,9 +90,9 @@ jobs:
           if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
             PR_HEAD=$(git rev-parse HEAD^2)
           fi
-          GREEN=$(gh run list --workflow fork-checks.yml --limit 20 \
-            --json headSha,conclusion --arg h1 "$HEAD" --arg h2 "$PR_HEAD" \
-            --jq '[.[] | select((.headSha == $h1 or .headSha == $h2) and .conclusion == "success")] | length')
+          GREEN=$(H1="$HEAD" H2="$PR_HEAD" gh run list --workflow fork-checks.yml --limit 20 \
+            --json headSha,conclusion \
+            --jq '[.[] | select((.headSha == env.H1 or .headSha == env.H2) and .conclusion == "success")] | length')
           if [ "$GREEN" -eq 0 ]; then
             echo "::error::fork-checks is not green on $HEAD (nor its merged PR head) -- merge a green PR first or re-run with skip_checks"
             exit 1
