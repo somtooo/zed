@@ -12,9 +12,13 @@ on:
 
 permissions:
   contents: write
-  # Merges from upstream touch workflow files, which GITHUB_TOKEN
-  # refuses to push without this scope.
-  workflows: write
+
+# NOTE: upstream merges regularly touch workflow files, and GitHub's
+# built-in token can never push those (no such scope exists for it).
+# This workflow therefore authenticates with a personal token stored as
+# the FORK_SYNC_PAT secret (classic PAT with the `workflow` scope, or
+# fine-grained with Contents + Workflows read/write). Without it, syncs
+# that touch .github/workflows fail at push time.
 
 concurrency:
   group: fork-sync
@@ -28,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.FORK_SYNC_PAT }}
 
       - name: Configure git
         run: |
