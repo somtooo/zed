@@ -480,6 +480,16 @@ pub struct Usage {
     pub completion_tokens: u64,
     pub prompt_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<CopilotPromptTokensDetails>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct CopilotPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

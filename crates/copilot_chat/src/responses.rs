@@ -244,6 +244,14 @@ pub struct ResponseUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub input_tokens_details: ResponseInputTokensDetails,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+pub struct ResponseInputTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

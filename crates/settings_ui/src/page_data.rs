@@ -9112,6 +9112,25 @@ fn ai_page(cx: &App) -> SettingsPage {
                 files: USER,
             }),
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Show Turn Cache Stats",
+                description: "Whether to show per-turn prompt-cache hit rate. Independent of turn time stats.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.show_turn_cache_stats"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.show_turn_cache_stats.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .show_turn_cache_stats = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Merge Conflict Indicator",
                 description: "Whether to show the merge conflict indicator in the status bar that offers to resolve conflicts using the agent.",
                 field: Box::new(SettingField {

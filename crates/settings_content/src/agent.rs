@@ -460,6 +460,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: false
     pub show_turn_stats: Option<bool>,
+    /// Whether to show per-turn prompt-cache hit rate alongside turn statistics.
+    /// Independent of `show_turn_stats`.
+    ///
+    /// Default: false
+    pub show_turn_cache_stats: Option<bool>,
     /// Whether to show the merge conflict indicator in the status bar
     /// that offers to resolve conflicts using the agent.
     ///

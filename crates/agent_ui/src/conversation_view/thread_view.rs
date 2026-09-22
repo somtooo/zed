@@ -676,6 +676,48 @@ pub struct TurnFields {
     pub turn_generation: usize,
     pub turn_started_at: Option<Instant>,
     pub turn_tokens: Option<u64>,
+    turn_cache: Option<TurnCacheStats>,
+    last_turn_cache: Option<TurnCacheStats>,
+}
+
+/// Prompt-cache figures for the current or last turn.
+///
+/// Bundled so the prompt and cache counts are always reset, snapshotted,
+/// and read together; updating one without the other would corrupt the rate.
+#[derive(Clone, Copy, Default)]
+struct TurnCacheStats {
+    prompt_tokens: u64,
+    cache_read_tokens: Option<u64>,
+}
+
+impl TurnCacheStats {
+    /// Merge a new cumulative snapshot, keeping the largest prompt and cache
+    /// figures seen. Streaming `TokenUsageUpdated` events repeat the full
+    /// snapshot, so `max` (not `+=`) gives the latest-request rate and stays
+    /// stable across tool-loop multi-request turns.
+    fn update(&mut self, prompt_tokens: u64, cache_read_tokens: Option<u64>) {
+        self.prompt_tokens = self.prompt_tokens.max(prompt_tokens);
+        self.cache_read_tokens = match (self.cache_read_tokens, cache_read_tokens) {
+            (Some(previous), Some(next)) => Some(previous.max(next)),
+            (None, next) => next,
+            (previous, None) => previous,
+        };
+    }
+
+    fn hit_rate(self) -> Option<f32> {
+        acp_thread::cache_hit_rate(self.prompt_tokens, self.cache_read_tokens)
+    }
+}
+
+/// Label for a per-turn cache hit rate, or `None` when unknown or below the
+/// token threshold. Independent of the elapsed-time clock and `show_turn_stats`.
+fn turn_cache_hit_label(stats: Option<TurnCacheStats>) -> Option<String> {
+    let stats = stats?;
+    if stats.prompt_tokens <= TOKEN_THRESHOLD {
+        return None;
+    }
+    let rate = stats.hit_rate()?;
+    Some(format!("CH {:.1}%", rate * 100.0))
 }
 
 /// How a tool call is rendered relative to its surroundings.
@@ -1405,6 +1447,8 @@ impl ThreadView {
         self.turn_fields.last_turn_duration = None;
         self.turn_fields.last_turn_tokens = None;
         self.turn_fields.turn_tokens = Some(0);
+        self.turn_fields.turn_cache = None;
+        self.turn_fields.last_turn_cache = None;
         self.turn_fields._turn_timer_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -1426,6 +1470,7 @@ impl ThreadView {
             .take()
             .map(|started| started.elapsed());
         self.turn_fields.last_turn_tokens = self.turn_fields.turn_tokens.take();
+        self.turn_fields.last_turn_cache = self.turn_fields.turn_cache.take();
         self.turn_fields._turn_timer_task = None;
     }
 
@@ -1435,6 +1480,13 @@ impl ThreadView {
                 *tokens += usage.output_tokens;
                 self.emit_token_limit_telemetry_if_needed(cx);
             }
+            // Turn CH% is the latest snapshot's rate, not an accumulated sum:
+            // `token_usage()` repeats the cumulative snapshot on every event.
+            let stats = self
+                .turn_fields
+                .turn_cache
+                .get_or_insert_with(TurnCacheStats::default);
+            stats.update(usage.input_tokens, usage.cache_read_input_tokens);
         }
     }
 
@@ -6911,6 +6963,12 @@ impl ThreadView {
             })
             .flatten();
 
+        let last_turn_cache_label = (is_thread_bottom
+            && AgentSettings::get_global(cx).show_turn_cache_stats)
+            .then(|| turn_cache_hit_label(self.turn_fields.last_turn_cache))
+            .flatten()
+            .map(|cache| Label::new(cache).size(LabelSize::Small).color(Color::Muted));
+
         let feedback_buttons = is_thread_bottom
             .then(|| {
                 (self.is_subagent() && self.is_thread_feedback_enabled(cx)).then(|| {
@@ -6984,7 +7042,9 @@ impl ThreadView {
             .opacity(0.4)
             .hover(|s| s.opacity(1.))
             .when(
-                last_turn_tokens_label.is_some() || last_turn_clock.is_some(),
+                last_turn_tokens_label.is_some()
+                    || last_turn_clock.is_some()
+                    || last_turn_cache_label.is_some(),
                 |this| {
                     this.child(
                         h_flex()
@@ -6994,6 +7054,9 @@ impl ThreadView {
                                 this.child(label).child(separator_dots())
                             })
                             .when_some(last_turn_clock, |this, label| {
+                                this.child(label).child(separator_dots())
+                            })
+                            .when_some(last_turn_cache_label, |this, label| {
                                 this.child(label).child(separator_dots())
                             }),
                     )
@@ -7509,6 +7572,11 @@ impl ThreadView {
             })
             .flatten();
 
+        let turn_cache_label = AgentSettings::get_global(cx)
+            .show_turn_cache_stats
+            .then(|| turn_cache_hit_label(self.turn_fields.turn_cache))
+            .flatten();
+
         let arrow_icon = if is_waiting {
             IconName::ArrowUp
         } else {
@@ -7568,6 +7636,9 @@ impl ThreadView {
                                 .color(Color::Muted),
                         ),
                 )
+            })
+            .when_some(turn_cache_label, |this, cache| {
+                this.child(Label::new(cache).size(LabelSize::Small).color(Color::Muted))
             })
             .into_any_element()
     }

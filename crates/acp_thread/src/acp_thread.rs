@@ -2217,9 +2217,17 @@ impl PlanEntry {
 pub struct TokenUsage {
     pub max_tokens: u64,
     pub used_tokens: u64,
+    /// Total prompt tokens, inclusive of cached tokens.
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub max_output_tokens: Option<u64>,
+    /// Tokens served from prompt cache. `None` when the provider did not
+    /// report cache figures, which is distinct from a true cold miss (`Some(0)`).
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u64>,
+    /// Tokens written to prompt cache. `None` when unreported.
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2252,6 +2260,21 @@ impl TokenUsage {
             TokenUsageRatio::Normal
         }
     }
+
+    pub fn cache_hit_rate(&self) -> Option<f32> {
+        cache_hit_rate(self.input_tokens, self.cache_read_input_tokens)
+    }
+}
+
+/// Share of prompt tokens served from cache. Returns `None` when the
+/// provider did not report cache figures or there is no prompt to rate,
+/// so callers can hide the indicator instead of showing a misleading 0%.
+pub fn cache_hit_rate(input_tokens: u64, cache_read_input_tokens: Option<u64>) -> Option<f32> {
+    let read = cache_read_input_tokens?;
+    if input_tokens == 0 {
+        return None;
+    }
+    Some(read as f32 / input_tokens as f32)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -5184,6 +5207,50 @@ mod tests {
             serde_json::to_value(deserialized).expect("serialize client message id"),
             json!("client-id")
         );
+    }
+
+    #[test]
+    fn token_usage_cache_hit_rate_reports_read_share() {
+        let usage = TokenUsage {
+            input_tokens: 200,
+            cache_read_input_tokens: Some(150),
+            ..Default::default()
+        };
+        assert_eq!(usage.cache_hit_rate(), Some(150.0 / 200.0));
+    }
+
+    #[test]
+    fn token_usage_cache_hit_rate_is_none_without_prompt() {
+        let usage = TokenUsage {
+            input_tokens: 0,
+            cache_read_input_tokens: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
+
+    #[test]
+    fn token_usage_cache_hit_rate_is_none_when_provider_omits_cache() {
+        let usage = TokenUsage {
+            input_tokens: 200,
+            cache_read_input_tokens: None,
+            ..Default::default()
+        };
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
+
+    #[test]
+    fn token_usage_without_cache_keys_deserializes_to_unknown() {
+        let usage: TokenUsage = serde_json::from_value(json!({
+            "max_tokens": 1000,
+            "used_tokens": 100,
+            "input_tokens": 100,
+            "output_tokens": 10,
+        }))
+        .expect("deserialize old usage without cache keys");
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.cache_hit_rate(), None);
     }
 
     fn init_test(cx: &mut TestAppContext) {

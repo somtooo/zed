@@ -437,12 +437,7 @@ pub fn map_to_language_model_completion_events(
 
                         if let Some(usage) = event.usage {
                             events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(
-                                TokenUsage {
-                                    input_tokens: usage.prompt_tokens,
-                                    output_tokens: usage.completion_tokens,
-                                    cache_creation_input_tokens: 0,
-                                    cache_read_input_tokens: 0,
-                                },
+                                copilot_chat_usage_to_token_usage(&usage),
                             )));
                         }
 
@@ -649,12 +644,9 @@ impl CopilotResponsesEventMapper {
             copilot_responses::StreamEvent::Completed { response } => {
                 let mut events = Vec::new();
                 if let Some(usage) = response.usage {
-                    events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
-                        input_tokens: usage.input_tokens.unwrap_or(0),
-                        output_tokens: usage.output_tokens.unwrap_or(0),
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                    })));
+                    events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(
+                        copilot_response_usage_to_token_usage(&usage),
+                    )));
                 }
                 if self.pending_stop_reason.take() != Some(StopReason::ToolUse) {
                     events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
@@ -680,12 +672,9 @@ impl CopilotResponsesEventMapper {
 
                 let mut events = Vec::new();
                 if let Some(usage) = response.usage {
-                    events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
-                        input_tokens: usage.input_tokens.unwrap_or(0),
-                        output_tokens: usage.output_tokens.unwrap_or(0),
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                    })));
+                    events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(
+                        copilot_response_usage_to_token_usage(&usage),
+                    )));
                 }
                 events.push(Ok(LanguageModelCompletionEvent::Stop(stop_reason)));
                 events
@@ -824,6 +813,36 @@ fn reasoning_input_item_from_output(
         summary: Vec::new(),
         encrypted_content,
     })
+}
+
+fn copilot_chat_usage_to_token_usage(usage: &crate::Usage) -> TokenUsage {
+    let details = usage.prompt_tokens_details.as_ref();
+    let cache_read_input_tokens = details.and_then(|details| details.cached_tokens).unwrap_or(0);
+    let cache_creation_input_tokens = details
+        .and_then(|details| details.cache_write_tokens)
+        .unwrap_or(0);
+    TokenUsage {
+        input_tokens: usage
+            .prompt_tokens
+            .saturating_sub(cache_read_input_tokens)
+            .saturating_sub(cache_creation_input_tokens),
+        output_tokens: usage.completion_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+    }
+}
+
+fn copilot_response_usage_to_token_usage(usage: &copilot_responses::ResponseUsage) -> TokenUsage {
+    let cache_read_input_tokens = usage.input_tokens_details.cached_tokens.unwrap_or(0);
+    TokenUsage {
+        input_tokens: usage
+            .input_tokens
+            .unwrap_or_default()
+            .saturating_sub(cache_read_input_tokens),
+        output_tokens: usage.output_tokens.unwrap_or_default(),
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens,
+    }
 }
 
 fn into_copilot_chat(
@@ -1456,6 +1475,7 @@ mod tests {
                         input_tokens: Some(5),
                         output_tokens: Some(3),
                         total_tokens: Some(8),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -1483,6 +1503,63 @@ mod tests {
             mapped[3],
             LanguageModelCompletionEvent::Stop(StopReason::EndTurn)
         ));
+    }
+
+    #[test]
+    fn chat_usage_splits_cached_tokens_from_prompt() {
+        let usage: crate::Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+            "prompt_tokens_details": {"cached_tokens": 75, "cache_write_tokens": 5},
+        }))
+        .expect("deserialize copilot chat usage");
+        let mapped = copilot_chat_usage_to_token_usage(&usage);
+        assert_eq!(mapped.input_tokens, 20);
+        assert_eq!(mapped.cache_read_input_tokens, 75);
+        assert_eq!(mapped.cache_creation_input_tokens, 5);
+    }
+
+    #[test]
+    fn chat_usage_without_cache_details_reports_zero_cache() {
+        let usage: crate::Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110,
+        }))
+        .expect("deserialize copilot chat usage");
+        let mapped = copilot_chat_usage_to_token_usage(&usage);
+        assert_eq!(mapped.input_tokens, 100);
+        assert_eq!(mapped.cache_read_input_tokens, 0);
+        assert_eq!(mapped.cache_creation_input_tokens, 0);
+    }
+
+    #[test]
+    fn chat_usage_clamps_inconsistent_cache_to_zero_input() {
+        let usage: crate::Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": 8, "cache_write_tokens": 5},
+        }))
+        .expect("deserialize inconsistent copilot chat usage");
+        let mapped = copilot_chat_usage_to_token_usage(&usage);
+        assert_eq!(mapped.input_tokens, 0);
+        assert_eq!(mapped.cache_read_input_tokens, 8);
+    }
+
+    #[test]
+    fn responses_usage_splits_cached_tokens_from_input() {
+        let usage: responses::ResponseUsage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 10,
+            "total_tokens": 110,
+            "input_tokens_details": {"cached_tokens": 60},
+        }))
+        .expect("deserialize copilot responses usage");
+        let mapped = copilot_response_usage_to_token_usage(&usage);
+        assert_eq!(mapped.input_tokens, 40);
+        assert_eq!(mapped.cache_read_input_tokens, 60);
     }
 
     #[test]
@@ -1744,6 +1821,7 @@ mod tests {
                     input_tokens: Some(10),
                     output_tokens: Some(0),
                     total_tokens: Some(10),
+                    ..Default::default()
                 }),
                 incomplete_details: Some(responses::IncompleteDetails {
                     reason: Some(responses::IncompleteReason::MaxOutputTokens),

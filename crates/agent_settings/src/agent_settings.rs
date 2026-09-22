@@ -249,6 +249,7 @@ pub struct AgentSettings {
     pub use_modifier_to_send: bool,
     pub message_editor_min_lines: usize,
     pub show_turn_stats: bool,
+    pub show_turn_cache_stats: bool,
     pub show_merge_conflict_indicator: bool,
     pub tool_permissions: ToolPermissions,
     pub sandbox_permissions: SandboxPermissions,
@@ -835,6 +836,9 @@ impl Settings for AgentSettings {
             use_modifier_to_send: agent.use_modifier_to_send.unwrap(),
             message_editor_min_lines: agent.message_editor_min_lines.unwrap(),
             show_turn_stats: agent.show_turn_stats.unwrap(),
+            // `unwrap_or` keeps old user settings and rebase states lacking the
+            // fork-additive key from panicking; do not "simplify" to `unwrap()`.
+            show_turn_cache_stats: agent.show_turn_cache_stats.unwrap_or(false),
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             sandbox_permissions: compile_sandbox_permissions(agent.sandbox_permissions),

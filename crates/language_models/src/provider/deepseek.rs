@@ -667,11 +667,14 @@ impl DeepSeekEventMapper {
         }
 
         if let Some(usage) = event.usage {
+            let cache_read_input_tokens = usage.prompt_cache_hit_tokens;
             events.push(Ok(LanguageModelCompletionEvent::UsageUpdate(TokenUsage {
-                input_tokens: usage.prompt_tokens,
+                input_tokens: usage
+                    .prompt_tokens
+                    .saturating_sub(cache_read_input_tokens),
                 output_tokens: usage.completion_tokens,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+                cache_read_input_tokens,
             })));
         }
 

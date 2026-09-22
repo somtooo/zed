@@ -1388,6 +1388,12 @@
     //
     // Default: false
     "show_turn_stats": false,
+    // Whether to show per-turn prompt-cache hit rate. Independent of `show_turn_stats`.
+    // Providers that do not report cache figures show no indicator; native
+    // providers without cache support may report 0%.
+    //
+    // Default: false
+    "show_turn_cache_stats": false,
     // Whether to show the merge conflict indicator in the status bar
     // that offers to resolve conflicts using the agent.
     //

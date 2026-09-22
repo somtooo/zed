@@ -608,6 +608,7 @@ mod tests {
             tool_permissions,
             sandbox_permissions: Default::default(),
             show_turn_stats: false,
+            show_turn_cache_stats: false,
             show_merge_conflict_indicator: true,
             sidebar_side: Default::default(),
             threads_sidebar_default_width: px(300.),
