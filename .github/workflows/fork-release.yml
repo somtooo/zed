@@ -216,8 +216,13 @@ jobs:
           Upstream base: $UPSTREAM_BASE"
           git push origin "$TAG"
           ls -la dist
-          gh release create "$TAG" --title "$TAG" \
+          # Artifacts nest one level (aarch64-apple-darwin/, release/), so
+          # collect files recursively instead of dist/*.
+          # --repo is mandatory: with an `upstream` remote present, gh
+          # targets the parent repo (zed-industries/zed) by default.
+          # shellcheck disable=SC2046
+          gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" \
             --notes "Fork snapshot of main at $(git rev-parse --short HEAD) (upstream base $UPSTREAM_BASE). Linux x86_64 and macOS Apple Silicon builds attached (macOS build is unsigned: right-click > Open on first launch)." \
-            dist/*
+            $(find dist -type f | sort)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
