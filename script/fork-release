@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# Build a fork release branch: an upstream stable tag plus your picks.
+#
+# Model: releases are cut from upstream stable tags, NOT from develop HEAD.
+# This script creates (or rebuilds) release/<tag> as:
+#   <upstream-tag> + each pick commit cherry-picked with -x, in order.
+# Picks normally come from develop (feature commits living there). Re-running
+# rebuilds the branch deterministically from the tag.
+#
+# Continuous releases: by default the picks are carried forward from the
+# latest release branch, so a new upstream tag usually needs no --pick flags
+# at all -- extra --pick flags apply after the carried ones. Pass --no-carry
+# for a pure upstream build, or --from <branch> to carry from a specific
+# older release instead of the latest. The old branch is never modified.
+#
+# Convention: fork feature commits use a `feature:` subject prefix, so release
+# picks are recognizable in `git log`. The script warns (only warns) when an
+# explicitly picked commit lacks the prefix.
+#
+# Tag scheme: fork-<upstream release> (e.g. fork-v1.20.2); if the tag already
+# exists a .N suffix is added. Tags are created by the fork-release workflow,
+# not here -- dispatch it with the release branch once fork-checks is green
+# on it. Nothing here publishes anything.
+#
+# Conflicts: picks can conflict when the release base is older than develop.
+# On conflict this script resolves with opencode headlessly (same model and
+# variant defaults as script/fork-sync); use --no-ai to abort for manual
+# resolution instead. CI never auto-resolves: the workflow only releases
+# green, conflict-free branches.
+#
+# Usage:
+#   script/fork-release [--dry-run] [--skip-verify] [--no-ai]
+#                       [--upstream-tag <vX.Y.Z>] [--pick <sha>...]
+#                       [--from <release-branch> | --no-carry]
+#                       [--model <m>] [--variant <v>] [<tag>]
+#
+#   --dry-run             print the plan (base, picks, branch, tag) and exit
+#                         before creating anything
+#   --skip-verify         skip ./script/fork-checks after building the branch
+#   --no-ai               don't call opencode; abort on conflict for manual fix
+#   --upstream-tag <v>    upstream stable tag to base on (default: latest)
+#   --pick <sha>          feature commit to cherry-pick (repeatable, in order;
+#                         must exist in develop's history)
+#   --from <branch>       carry picks from this release branch instead of the
+#                         latest one (e.g. --from release/fork-v1.20.2);
+#                         extra --pick flags apply after the carried ones
+#   --no-carry            don't carry any picks (pure upstream build)
+#   --model <m>           opencode model (default: opencode/muse-spark-1.3-contributor-free)
+#   --variant <v>         model reasoning variant (default: xhigh)
+#   <tag>                 release tag (default: fork-<upstream-tag>[.N])
+#
+# Run from develop with a clean tree. Then dispatch the fork-release workflow
+# with branch=release/<tag> to verify, tag, build, and publish.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+DRY_RUN=false
+SKIP_VERIFY=false
+AI=true
+UPSTREAM_TAG=""
+TAG=""
+MODEL="opencode/muse-spark-1.3-contributor-free"
+VARIANT="xhigh"
+PICKS=()
+FROM_BRANCH=""
+NO_CARRY=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --skip-verify)
+            SKIP_VERIFY=true
+            shift
+            ;;
+        --no-ai)
+            AI=false
+            shift
+            ;;
+        --upstream-tag)
+            UPSTREAM_TAG="$2"
+            shift 2
+            ;;
+        --pick)
+            PICKS+=("$2")
+            shift 2
+            ;;
+        --from)
+            FROM_BRANCH="$2"
+            shift 2
+            ;;
+        --no-carry)
+            NO_CARRY=true
+            shift
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --variant)
+            VARIANT="$2"
+            shift 2
+            ;;
+        -h | --help)
+            echo "Usage: script/fork-release [--dry-run] [--skip-verify] [--no-ai] [--upstream-tag <vX.Y.Z>] [--pick <sha>...] [--from <release-branch> | --no-carry] [--model <m>] [--variant <v>] [<tag>]"
+            exit 0
+            ;;
+        -*)
+            echo "Unknown argument: $1 (see --help)" >&2
+            exit 1
+            ;;
+        *)
+            TAG="$1"
+            shift
+            ;;
+    esac
+done
+
+latest_stable_upstream() {
+    local tags
+    tags=$(git ls-remote --tags --refs upstream 2>/dev/null | awk '{print $2}' | sed 's|refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+    if [ -z "$tags" ]; then
+        tags=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)
+    fi
+    echo "$tags" | sort -V | tail -n 1
+}
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "error: working tree is dirty -- commit or stash first" >&2
+    exit 1
+fi
+
+BRANCH=$(git branch --show-current)
+if [ "$BRANCH" != "develop" ]; then
+    echo "error: run from develop (currently on '$BRANCH')" >&2
+    exit 1
+fi
+
+git fetch origin >/dev/null 2>&1 || true
+git fetch upstream --tags >/dev/null 2>&1 || true
+
+if [ -z "$UPSTREAM_TAG" ]; then
+    UPSTREAM_TAG=$(latest_stable_upstream)
+    if [ -z "$UPSTREAM_TAG" ]; then
+        echo "error: could not determine latest stable upstream tag" >&2
+        exit 1
+    fi
+fi
+
+case "$UPSTREAM_TAG" in
+    v[0-9]*.[0-9]*.[0-9]*)
+        ;;
+    *)
+        echo "error: upstream tag must look like 'vX.Y.Z' (got '$UPSTREAM_TAG')" >&2
+        exit 1
+        ;;
+esac
+
+if ! git rev-parse --verify --quiet "refs/tags/$UPSTREAM_TAG" >/dev/null; then
+    echo "error: upstream tag $UPSTREAM_TAG not found locally -- fetch upstream tags first" >&2
+    exit 1
+fi
+
+for pick in ${PICKS[@]+"${PICKS[@]}"}; do
+    if ! git cat-file -e "$pick^{commit}" 2>/dev/null; then
+        echo "error: pick $pick is not a commit" >&2
+        exit 1
+    fi
+    if ! git merge-base --is-ancestor "$pick" develop; then
+        echo "error: pick $pick is not in develop's history -- cherry-pick it to develop first" >&2
+        exit 1
+    fi
+    SUBJECT=$(git log -1 --format=%s "$pick")
+    case "$SUBJECT" in
+        feature:*) ;;
+        *)
+            echo "warning: pick $pick subject lacks the 'feature:' prefix ($SUBJECT)"
+            ;;
+    esac
+done
+
+if [ "$NO_CARRY" = true ] && [ -n "$FROM_BRANCH" ]; then
+    echo "error: --no-carry and --from cannot be combined" >&2
+    exit 1
+fi
+
+CARRY_SOURCE=""
+if [ "$NO_CARRY" = false ] && [ -z "$FROM_BRANCH" ]; then
+    FROM_BRANCH=$(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/release/fork-v*' 2>/dev/null | sed 's|^origin/||' | sort -V | tail -n 1 || true)
+    if [ -z "$FROM_BRANCH" ]; then
+        FROM_BRANCH=$(git for-each-ref --format='%(refname:short)' 'refs/heads/release/fork-v*' 2>/dev/null | sort -V | tail -n 1 || true)
+    fi
+fi
+
+if [ -n "$FROM_BRANCH" ]; then
+    case "$FROM_BRANCH" in
+        release/fork-v*) ;;
+        *)
+            echo "error: carry branch must look like 'release/fork-vX.Y.Z' (got '$FROM_BRANCH')" >&2
+            exit 1
+            ;;
+    esac
+    FROM_REF=""
+    if git rev-parse --verify --quiet "refs/remotes/origin/$FROM_BRANCH" >/dev/null; then
+        FROM_REF="refs/remotes/origin/$FROM_BRANCH"
+    elif git rev-parse --verify --quiet "refs/heads/$FROM_BRANCH" >/dev/null; then
+        FROM_REF="refs/heads/$FROM_BRANCH"
+    else
+        echo "error: carry branch $FROM_BRANCH not found locally or on origin" >&2
+        exit 1
+    fi
+    FROM_UPSTREAM_TAG="${FROM_BRANCH#release/fork-}"
+    if ! git rev-parse --verify --quiet "refs/tags/$FROM_UPSTREAM_TAG" >/dev/null; then
+        echo "error: cannot find upstream tag $FROM_UPSTREAM_TAG for carry branch $FROM_BRANCH" >&2
+        exit 1
+    fi
+    if [ -n "$(git rev-list --merges "$FROM_UPSTREAM_TAG".."$FROM_REF" || true)" ]; then
+        echo "error: carry branch $FROM_BRANCH contains merge commits -- rebuild manually with explicit --pick flags" >&2
+        exit 1
+    fi
+    CARRIED=()
+    while IFS= read -r sha; do
+        [ -n "$sha" ] && CARRIED+=("$sha")
+    done < <(git rev-list --reverse "$FROM_UPSTREAM_TAG".."$FROM_REF" || true)
+    if [ "${#CARRIED[@]}" -eq 0 ]; then
+        echo "warning: carry branch $FROM_BRANCH carries no picks (pure upstream build)"
+    else
+        CARRY_SOURCE="$FROM_BRANCH"
+    fi
+    PICKS=("${CARRIED[@]+"${CARRIED[@]}"}" ${PICKS[@]+"${PICKS[@]}"})
+fi
+
+if [ -z "$TAG" ]; then
+    BASE="fork-$UPSTREAM_TAG"
+    TAG="$BASE"
+    N=1
+    while git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; do
+        N=$((N + 1))
+        TAG="$BASE.$N"
+    done
+fi
+
+case "$TAG" in
+    fork-v*) ;;
+    *)
+        echo "error: tag must look like 'fork-vX.Y.Z' (got '$TAG')" >&2
+        exit 1
+        ;;
+esac
+
+if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+    echo "error: tag $TAG already exists" >&2
+    exit 1
+fi
+
+RELEASE_BRANCH="release/$TAG"
+BASE_SHA=$(git rev-parse --short "$UPSTREAM_TAG")
+
+echo "Upstream tag:      $UPSTREAM_TAG ($BASE_SHA)"
+echo "Release branch:    $RELEASE_BRANCH"
+echo "Release tag:       $TAG (created by the workflow, not here)"
+if [ -n "$CARRY_SOURCE" ]; then
+    echo "Carried from:      $CARRY_SOURCE"
+fi
+if [ "${#PICKS[@]}" -eq 0 ]; then
+    echo "Picks:             (none -- pure upstream build)"
+else
+    echo "Picks:"
+    for pick in "${PICKS[@]}"; do
+        echo "  $(git rev-parse --short "$pick") $(git log -1 --format=%s "$pick")"
+    done
+fi
+
+if [ "$DRY_RUN" = true ]; then
+    echo "--dry-run: not creating anything."
+    exit 0
+fi
+
+PRIOR_SHA=""
+if git rev-parse --verify --quiet "refs/heads/$RELEASE_BRANCH" >/dev/null; then
+    PRIOR_SHA=$(git rev-parse "$RELEASE_BRANCH")
+fi
+
+restore_on_failure() {
+    git cherry-pick --abort >/dev/null 2>&1 || true
+    git checkout develop >/dev/null 2>&1 || true
+    if [ -n "$PRIOR_SHA" ]; then
+        git checkout -B "$RELEASE_BRANCH" "$PRIOR_SHA" >/dev/null 2>&1 || true
+        git checkout develop >/dev/null 2>&1 || true
+    else
+        git branch -D "$RELEASE_BRANCH" >/dev/null 2>&1 || true
+    fi
+}
+
+git checkout -B "$RELEASE_BRANCH" "$UPSTREAM_TAG"
+
+for pick in ${PICKS[@]+"${PICKS[@]}"}; do
+    if git cherry-pick -x "$pick"; then
+        continue
+    fi
+    CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+    echo "Conflict cherry-picking $pick onto $UPSTREAM_TAG:"
+    echo "$CONFLICTS"
+    if [ "$AI" = false ]; then
+        restore_on_failure
+        echo "Aborted (--no-ai). Resolve manually, then re-run." >&2
+        exit 1
+    fi
+    if ! command -v opencode >/dev/null 2>&1; then
+        restore_on_failure
+        echo "error: opencode CLI not found -- install it or re-run with --no-ai" >&2
+        exit 1
+    fi
+    SUBJECT=$(git log -1 --format=%s "$pick")
+    echo "Resolving with opencode ($MODEL, variant $VARIANT) ..."
+    if ! opencode run -m "$MODEL" --variant "$VARIANT" "You are resolving a git cherry-pick conflict in this repo. Context: release branch $RELEASE_BRANCH (currently checked out) is upstream stable tag $UPSTREAM_TAG plus cherry-picked feature commits. Commit $pick ($SUBJECT) from develop just conflicted here; the conflicted files now contain git conflict markers: $CONFLICTS.
+
+How to resolve each file:
+1. Inspect every conflict hunk (grep -n '^<<<<<<< \|^=======$\|^>>>>>>> ' in each file). Use 'git log --merge --oneline -p -- <file>' plus 'git show :2:<file>' (BASE, the release base) and 'git show :3:<file>' (THEIRS, the feature commit) to understand what each side intended.
+2. Merge SEMANTICALLY: keep the feature's intent, adapted to the release base's (older) APIs. Do NOT pull newer upstream code into the release branch to satisfy the feature -- if the feature needs APIs the release base lacks, prefer the smallest adaptation that keeps it compiling and behaving the same.
+3. Follow this repo's Rust rules (AGENTS.md): no unwrap()/expect() in new code, propagate errors with ?, handle fallible results explicitly, full-word variable names, and keep diffs minimal -- no drive-by reformatting.
+4. Remove ALL conflict markers. After editing each file, stage it with 'git add <file>'. Do NOT commit and do NOT run 'git cherry-pick --continue' -- the script continues the pick after verifying.
+5. When all files are staged, run 'git diff --check' (must be clean) and verify no markers remain (rg -n '^<{7} |^={7}$\|^>{7} ' on the touched files).
+
+Final summary must list: each file, what each side changed, and how you reconciled it."; then
+        restore_on_failure
+        echo "error: opencode run failed -- pick aborted, back on develop." >&2
+        exit 1
+    fi
+    if [ -n "$(git diff --name-only --diff-filter=U || true)" ]; then
+        restore_on_failure
+        echo "error: conflicts remain after opencode -- pick aborted, back on develop." >&2
+        echo "Re-run with --no-ai and resolve manually." >&2
+        exit 1
+    fi
+    if ! git diff --check; then
+        restore_on_failure
+        echo "error: whitespace/marker issues after opencode -- pick aborted, back on develop." >&2
+        exit 1
+    fi
+    git cherry-pick --continue --no-edit
+    echo "AI resolution committed for $pick"
+done
+
+if [ "$SKIP_VERIFY" = true ]; then
+    echo "WARNING: skipping checks -- only release if fork-checks is green on $RELEASE_BRANCH."
+else
+    ./script/fork-checks
+fi
+
+git push -u origin "$RELEASE_BRANCH"
+
+echo "Release branch ready: $RELEASE_BRANCH"
+echo "Next: dispatch the fork-release workflow with branch=$RELEASE_BRANCH"
+echo "  gh workflow run fork-release.yml --ref develop -f branch=$RELEASE_BRANCH"
