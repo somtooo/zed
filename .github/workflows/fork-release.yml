@@ -11,10 +11,11 @@
 #
 # Model: release branches are built locally first with script/fork-release:
 #   release/<tag> = <upstream stable tag> + cherry-picked feature commits.
-# This workflow verifies the branch (fork-checks green on its head), tags it,
-# builds it, and publishes the tag. Tag scheme: fork-<upstream release>
-# (e.g. fork-v1.20.2); -pre tags are skipped. It never cherry-picks and never
-# resolves conflicts -- if the branch is red, fix it locally and re-dispatch.
+# This workflow verifies the branch (clippy + nextest + doctests run here on
+# the release tree itself -- release branches carry no workflow files, so the
+# fork-checks workflow cannot run against them), tags it, builds it, and
+# publishes the tag. Tag scheme: fork-<upstream release> (e.g. fork-v1.20.2);
+# -pre tags are skipped. Set skip_checks only to bypass the inline gate.
 name: fork-release
 
 on:
@@ -30,7 +31,7 @@ on:
         default: ""
         type: string
       skip_checks:
-        description: "Skip the fork-checks green-on-head requirement"
+        description: "Skip the inline verification gate"
         required: false
         default: false
         type: boolean
@@ -112,7 +113,7 @@ jobs:
           if ! git remote get-url upstream >/dev/null 2>&1; then
             git remote add upstream https://github.com/zed-industries/zed.git
           fi
-          git fetch upstream --tags
+          git fetch upstream "refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
           if ! git rev-parse --verify --quiet "refs/tags/$UPSTREAM_TAG" >/dev/null; then
             echo "::error::upstream tag $UPSTREAM_TAG not found"
             exit 1
@@ -120,21 +121,150 @@ jobs:
           echo "value=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
           echo "Upstream base: $UPSTREAM_TAG ($(git rev-parse --short "$UPSTREAM_TAG"))"
 
-      - name: Require fork-checks green on branch head
-        if: ${{ ! inputs.skip_checks }}
+  verify-clippy:
+    needs: guard
+    if: ${{ !inputs.skip_checks }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.guard.outputs.branch }}
+
+      - name: Setup cargo CI config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Linux
+        run: ./script/linux
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Clippy
+        run: ./script/clippy
+
+      - name: Cleanup cargo config
+        if: always()
+        run: rm -rf ./../.cargo
+
+  verify-tests:
+    needs: guard
+    if: ${{ !inputs.skip_checks }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 500ms
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.guard.outputs.branch }}
+
+      - name: Setup cargo CI config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Linux
+        run: ./script/linux
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Setup software rendering (no GPU on free runners)
+        run: sudo apt-get install -y xvfb libgl1-mesa-dri mesa-vulkan-drivers
+
+      - name: Full test suite
         run: |
           set -euo pipefail
-          HEAD=$(git rev-parse HEAD)
-          GREEN=$(H1="$HEAD" gh run list --workflow fork-checks.yml --limit 20 \
-            --json headSha,conclusion \
-            --jq '[.[] | select(.headSha == env.H1 and .conclusion == "success")] | length')
-          if [ "$GREEN" -eq 0 ]; then
-            echo "::error::fork-checks is not green on $HEAD -- push to the release branch (checks run on push to release/**) and re-dispatch when green, or re-run with skip_checks"
-            exit 1
-          fi
-          echo "fork-checks green for $HEAD"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uncommitted on purpose: .config/nextest.toml is upstream-owned.
+          # Free runners are ~4x slower than upstream's, so give the two
+          # known-slow tests the same 300s budget upstream grants its own
+          # slow ones, and retry flakes once (cargo cache makes retries fast).
+          cat >> .config/nextest.toml <<'EOF'
+
+          [[profile.default.overrides]]
+          filter = 'test(test_random_columnar_selections) or test(test_completion_without_text_edit) or test(test_random_worktree_changes)'
+          slow-timeout = { period = "300s", terminate-after = 1 }
+          EOF
+          xvfb-run -a cargo nextest run --workspace --no-fail-fast --no-tests=warn --retries 1
+
+      - name: Cleanup cargo config
+        if: always()
+        run: rm -rf ./../.cargo
+
+  verify-doctests:
+    needs: guard
+    if: ${{ !inputs.skip_checks }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.guard.outputs.branch }}
+
+      - name: Setup cargo CI config
+        run: |
+          mkdir -p ./../.cargo
+          cp ./.cargo/ci-config.toml ./../.cargo/config.toml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Linux
+        run: ./script/linux
+
+      - name: Download WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Doctests
+        run: cargo test --workspace --doc --no-fail-fast
+
+      - name: Cleanup cargo config
+        if: always()
+        run: rm -rf ./../.cargo
 
   build-linux-x86_64:
     needs: guard
@@ -219,9 +349,27 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [guard, build-linux-x86_64, build-macos-aarch64]
+    needs: [guard, verify-clippy, verify-tests, verify-doctests, build-linux-x86_64, build-macos-aarch64]
+    if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Gate
+        run: |
+          set +x
+          SKIP="${{ inputs.skip_checks }}"
+          fail_unless_ok() {
+            echo "* $1: $2"
+            if [[ "$2" == "success" ]]; then return; fi
+            if [[ "$SKIP" == "true" && "$2" == "skipped" ]]; then return; fi
+            exit 1
+          }
+          [ "${{ needs.guard.result }}" == "success" ] || exit 1
+          fail_unless_ok "verify-clippy" "${{ needs.verify-clippy.result }}"
+          fail_unless_ok "verify-tests" "${{ needs.verify-tests.result }}"
+          fail_unless_ok "verify-doctests" "${{ needs.verify-doctests.result }}"
+          [ "${{ needs.build-linux-x86_64.result }}" == "success" ] || exit 1
+          [ "${{ needs.build-macos-aarch64.result }}" == "success" ] || exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -248,7 +396,7 @@ jobs:
           if ! git remote get-url upstream >/dev/null 2>&1; then
             git remote add upstream https://github.com/zed-industries/zed.git
           fi
-          git fetch upstream --tags
+          git fetch upstream "refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
           HEAD_SHA=$(git rev-parse --short HEAD)
           PICKS=$(git log "$UPSTREAM_TAG"..HEAD --format='- %s')
           git tag -a "$TAG" -m "Fork release $TAG

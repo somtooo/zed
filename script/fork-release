@@ -18,9 +18,11 @@
 # explicitly picked commit lacks the prefix.
 #
 # Tag scheme: fork-<upstream release> (e.g. fork-v1.20.2); if the tag already
-# exists a .N suffix is added. Tags are created by the fork-release workflow,
-# not here -- dispatch it with the release branch once fork-checks is green
-# on it. Nothing here publishes anything.
+# exists a .N suffix is added. Verification (clippy + nextest + doctests)
+# runs inside the fork-release workflow on the release tree itself, because
+# release branches carry no scripts to verify with locally. Tags are created
+# by the workflow, not here -- dispatch it with the release branch.
+# Nothing here publishes anything.
 #
 # Conflicts: picks can conflict when the release base is older than develop.
 # On conflict this script resolves with opencode headlessly (same model and
@@ -29,14 +31,13 @@
 # green, conflict-free branches.
 #
 # Usage:
-#   script/fork-release [--dry-run] [--skip-verify] [--no-ai]
+#   script/fork-release [--dry-run] [--no-ai]
 #                       [--upstream-tag <vX.Y.Z>] [--pick <sha>...]
 #                       [--from <release-branch> | --no-carry]
 #                       [--model <m>] [--variant <v>] [<tag>]
 #
 #   --dry-run             print the plan (base, picks, branch, tag) and exit
 #                         before creating anything
-#   --skip-verify         skip ./script/fork-checks after building the branch
 #   --no-ai               don't call opencode; abort on conflict for manual fix
 #   --upstream-tag <v>    upstream stable tag to base on (default: latest)
 #   --pick <sha>          feature commit to cherry-pick (repeatable, in order;
@@ -57,7 +58,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 DRY_RUN=false
-SKIP_VERIFY=false
 AI=true
 UPSTREAM_TAG=""
 TAG=""
@@ -71,10 +71,6 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run)
             DRY_RUN=true
-            shift
-            ;;
-        --skip-verify)
-            SKIP_VERIFY=true
             shift
             ;;
         --no-ai)
@@ -106,7 +102,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         -h | --help)
-            echo "Usage: script/fork-release [--dry-run] [--skip-verify] [--no-ai] [--upstream-tag <vX.Y.Z>] [--pick <sha>...] [--from <release-branch> | --no-carry] [--model <m>] [--variant <v>] [<tag>]"
+            echo "Usage: script/fork-release [--dry-run] [--no-ai] [--upstream-tag <vX.Y.Z>] [--pick <sha>...] [--from <release-branch> | --no-carry] [--model <m>] [--variant <v>] [<tag>]"
             exit 0
             ;;
         -*)
@@ -346,14 +342,8 @@ Final summary must list: each file, what each side changed, and how you reconcil
     echo "AI resolution committed for $pick"
 done
 
-if [ "$SKIP_VERIFY" = true ]; then
-    echo "WARNING: skipping checks -- only release if fork-checks is green on $RELEASE_BRANCH."
-else
-    ./script/fork-checks
-fi
-
 git push -u origin "$RELEASE_BRANCH"
 
 echo "Release branch ready: $RELEASE_BRANCH"
-echo "Next: dispatch the fork-release workflow with branch=$RELEASE_BRANCH"
+echo "Verification runs inside the fork-release workflow when you dispatch it:"
 echo "  gh workflow run fork-release.yml --ref develop -f branch=$RELEASE_BRANCH"
