@@ -20,7 +20,8 @@ on:
     inputs:
       branch:
         description: "Release branch (e.g. release/fork-v1.24.3)"
-        required: true
+        required: false
+        default: "release/fork-v1.24.3"
         type: string
       tag:
         description: "Release tag (default: derived from branch)"
@@ -37,6 +38,13 @@ on:
         required: false
         default: false
         type: boolean
+  # workflow_dispatch only works for workflows that exist on the default
+  # branch, so this workflow cannot be dispatched while it lives on a test
+  # branch. Pushing to the test branch runs it instead, building the branch
+  # named by the `branch` input's default.
+  push:
+    branches:
+      - test/fork-release-macos
 
 permissions:
   contents: write
@@ -57,18 +65,38 @@ jobs:
       branch: ${{ steps.tag.outputs.branch }}
       upstream_tag: ${{ steps.upstream.outputs.value }}
     steps:
+      - name: Resolve branch
+        id: resolve
+        run: |
+          set -euo pipefail
+          # A push event carries no inputs, so fall back to the default
+          # release branch in that case.
+          BRANCH="${{ inputs.branch }}"
+          if [ -z "$BRANCH" ]; then
+            BRANCH="release/fork-v1.24.3"
+          fi
+          echo "value=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          # Same for skip_checks: a push event has no inputs, and while
+          # testing we do not want the fork-checks gate to block the run.
+          SKIP_CHECKS="${{ inputs.skip_checks }}"
+          if [ -z "$SKIP_CHECKS" ]; then
+            SKIP_CHECKS="true"
+          fi
+          echo "skip_checks=$SKIP_CHECKS" >> "$GITHUB_OUTPUT"
+
       - name: Checkout release branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.branch }}
+          ref: ${{ steps.resolve.outputs.value }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate branch and derive tag
         id: tag
         run: |
           set -euo pipefail
-          BRANCH="${{ inputs.branch }}"
+          BRANCH="${{ steps.resolve.outputs.value }}"
           case "$BRANCH" in
             release/fork-v*) ;;
             *) echo "::error::branch must look like 'release/fork-vX.Y.Z' (got '$BRANCH')"; exit 1 ;;
@@ -106,7 +134,7 @@ jobs:
         id: upstream
         run: |
           set -euo pipefail
-          BRANCH="${{ inputs.branch }}"
+          BRANCH="${{ steps.resolve.outputs.value }}"
           UPSTREAM_TAG="${BRANCH#release/fork-}"
           case "$UPSTREAM_TAG" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
@@ -124,7 +152,7 @@ jobs:
           echo "Upstream base: $UPSTREAM_TAG ($(git rev-parse --short "$UPSTREAM_TAG"))"
 
       - name: Require fork-checks green on branch head
-        if: ${{ !inputs.skip_checks }}
+        if: ${{ steps.resolve.outputs.skip_checks != 'true' }}
         run: |
           set -euo pipefail
           # Pushing the release branch runs fork-checks on it (the branch
@@ -315,7 +343,7 @@ jobs:
 
   publish:
     needs: [guard, build-macos-aarch64]
-    if: ${{ inputs.publish }}
+    if: ${{ inputs.publish == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
