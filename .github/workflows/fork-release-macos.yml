@@ -243,21 +243,27 @@ jobs:
             real=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$xcode")
             if [ "$real" != "$KEEP_XCODE" ]; then
               echo "Removing $xcode"
-              sudo rm -rf "$xcode" &
+              sudo rm -rf "$xcode" 2>/dev/null || true &
             fi
           done
           wait
 
-          # Simulator runtimes are the other large chunk of the image.
+          # Simulator runtimes are the other large chunk of the image. They
+          # live in mounted disk images under CoreSimulator/Volumes, which
+          # have to be unmounted before the directory can be removed.
           sudo xcrun simctl runtime delete all 2>/dev/null || true
-          sudo rm -rf /Library/Developer/CoreSimulator
-          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator
-          sudo rm -rf /Users/runner/Library/Android
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /Users/runner/.dotnet
-          sudo rm -rf /usr/local/share/dotnet
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /Users/runner/Library/Caches/Homebrew
+          for volume in /Library/Developer/CoreSimulator/Volumes/*; do
+            [ -d "$volume" ] || continue
+            sudo diskutil unmount force "$volume" 2>/dev/null || true
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Android 2>/dev/null || true
+          sudo rm -rf /usr/local/share/powershell 2>/dev/null || true
+          sudo rm -rf /Users/runner/.dotnet 2>/dev/null || true
+          sudo rm -rf /usr/local/share/dotnet 2>/dev/null || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Caches/Homebrew 2>/dev/null || true
 
           echo "=== Disk after cleanup ==="
           df -h /System/Volumes/Data
@@ -331,6 +337,7 @@ jobs:
           echo "=== Disk after build ==="
           df -h /System/Volumes/Data
           du -sh target 2>/dev/null || true
+          du -sh target/aarch64-apple-darwin/release/deps 2>/dev/null || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
