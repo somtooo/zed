@@ -6,9 +6,10 @@
 #
 # A conflicted rebase is not a stop-and-fix-locally affair anymore: the
 # `resolve` job runs script/fork-resolve with opencode inside a
-# Namespace Devbox (the image carries an authenticated opencode), then the
-# result is verified by fork-checks before it is pushed to develop. If the
-# resolution fails, the run fails and the conflict is resolved locally as
+# Namespace Devbox (the image carries an authenticated opencode). The resolver
+# repairs build and focused test failures in changed Rust packages before the
+# full fork-checks gate runs; only a fully verified result is pushed to develop.
+# If resolution or either test gate fails, the conflict is resolved locally as
 # before.
 #
 # The `selftest` input only exercises the Devbox path (create, exec, delete)
@@ -208,10 +209,14 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # The image has no cmake, which the WebRTC build script needs for
-          # the build check after the rebase.
-          if ! command -v cmake >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq cmake
+          # The image needs the WebRTC build dependency and the headless Linux
+          # test renderer used by the focused preflight.
+          if ! command -v cmake >/dev/null 2>&1 \
+            || ! command -v jq >/dev/null 2>&1 \
+            || ! command -v xvfb-run >/dev/null 2>&1 \
+            || ! dpkg-query -W cmake jq xvfb libgl1-mesa-dri mesa-vulkan-drivers >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq cmake jq xvfb libgl1-mesa-dri mesa-vulkan-drivers
           fi
 
           rm -rf "$WORK_DIR"
@@ -225,7 +230,7 @@ jobs:
           # available even when the rebase is still replaying the commit
           # that introduced it.
           git show "origin/$REF_NAME:script/fork-resolve" > /tmp/fork-resolve
-          bash /tmp/fork-resolve --onto origin/main --model "${{ env.OPENCODE_MODEL }}"
+          bash /tmp/fork-resolve --onto origin/main --model "${{ env.OPENCODE_MODEL }}" --test-touched-packages
           # Hand the rebased commits back to the runner as a bundle: the
           # runner has the base (main) and the credentials to push.
           git bundle create "$WORK_DIR/resolved.bundle" "$BRANCH" ^origin/main
@@ -254,8 +259,9 @@ jobs:
             # The build check after the rebase needs the same toolchain the
             # checks use.
             ./script/linux
+            sudo apt-get install -y xvfb libgl1-mesa-dri mesa-vulkan-drivers
             ./script/download-wasi-sdk
-            bash /tmp/fork-resolve --onto origin/main --model "${{ env.OPENCODE_MODEL_FALLBACK }}"
+            bash /tmp/fork-resolve --onto origin/main --model "${{ env.OPENCODE_MODEL_FALLBACK }}" --test-touched-packages
             git bundle create /tmp/resolved.bundle "$BRANCH" ^origin/main
             git log --oneline -3
           fi

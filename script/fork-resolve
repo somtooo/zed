@@ -19,6 +19,7 @@
 #   script/fork-resolve [--onto <ref>] [--upstream-point <ref>]
 #                        [--model <m>] [--variant <v>]
 #                        [--fix-build] [--no-fix-build] [--build-attempts <n>]
+#                        [--test-touched-packages] [--test-attempts <n>]
 #
 #   --onto <ref>         base to replay the commits onto (default: main)
 #   --upstream-point <ref>
@@ -31,6 +32,9 @@
 #   --fix-build          repair compile errors after the replay (default)
 #   --no-fix-build       only resolve the conflicts
 #   --build-attempts <n> how often to try repairing the build (default: 2)
+#   --test-touched-packages
+#                        test each Cargo package containing changed Rust files
+#   --test-attempts <n>  how often to repair focused test failures (default: 2)
 #
 # On success the replay is finished and the working tree holds the replayed
 # branch. On failure the replay is aborted and the script exits 1.
@@ -43,6 +47,8 @@ MODEL="github-copilot/claude-sonnet-5.5"
 VARIANT="xhigh"
 FIX_BUILD=true
 BUILD_ATTEMPTS=2
+TEST_TOUCHED_PACKAGES=false
+TEST_ATTEMPTS=2
 AI=true
 REPLAY_ONLY=false
 
@@ -85,8 +91,16 @@ while [ "$#" -gt 0 ]; do
             BUILD_ATTEMPTS="$2"
             shift 2
             ;;
+        --test-touched-packages)
+            TEST_TOUCHED_PACKAGES=true
+            shift
+            ;;
+        --test-attempts)
+            TEST_ATTEMPTS="$2"
+            shift 2
+            ;;
         -h | --help)
-            echo "Usage: script/fork-resolve [--onto <ref>] [--upstream-point <ref>] [--no-replay] [--model <m>] [--variant <v>] [--fix-build|--no-fix-build] [--build-attempts <n>] [--no-ai]"
+            echo "Usage: script/fork-resolve [--onto <ref>] [--upstream-point <ref>] [--no-replay] [--model <m>] [--variant <v>] [--fix-build|--no-fix-build] [--build-attempts <n>] [--test-touched-packages] [--test-attempts <n>] [--no-ai]"
             exit 0
             ;;
         *)
@@ -209,7 +223,7 @@ if [ "$REPLAY_ONLY" = false ]; then
     3. Follow this repo's Rust rules (AGENTS.md): no unwrap()/expect() in new code, propagate errors with ?, handle fallible results explicitly, full-word variable names, and keep diffs minimal -- no drive-by reformatting.
     4. Remove ALL conflict markers. After editing each file, stage it with 'git add <file>'. Do NOT commit and do NOT run 'git rebase --continue' -- the script continues the rebase after verifying.
     5. When all files are staged, run 'git diff --check' (must be clean) and verify no markers remain (rg -n '^<{7} |^={7}\$|^>{7} ' on the touched files).
-    6. Do NOT run cargo build, cargo check or cargo test: the fork-checks gate verifies the result afterwards, and this environment has no complete build toolchain (no cmake). Resolve the conflict, stage it, and stop.
+    6. Do NOT run cargo build, cargo check or cargo test while the rebase is paused: later fork commits may not have been replayed yet. After the complete replay, fork-resolve runs focused tests for every Cargo package containing changed Rust files and will ask you to repair any failures before the branch is handed to fork-checks. Resolve the conflict, stage it, and stop.
 
     Final summary must list: each file, what each side changed, and how you reconciled it."; then
             git rebase --abort
@@ -255,18 +269,16 @@ else
     echo "Skipping the replay (--no-replay)."
 fi
 
-if [ "$FIX_BUILD" = false ]; then
-    exit 0
-fi
-
-# The replay can leave the fork's code not compiling: upstream renames and
-# removes APIs, and the fork's own code still uses the old names. Repair it
-# here, with the same model, instead of leaving it for a human.
-# The log has to live inside the project: opencode refuses to read files
-# outside the project directory in a non-interactive run.
-BUILD_LOG="$REPO_ROOT/target/fork-resolve-build.log"
-mkdir -p "$(dirname "$BUILD_LOG")"
 COMMITS_BEFORE=$(git rev-list --count "$ONTO"..HEAD)
+if [ "$FIX_BUILD" = true ]; then
+    # The replay can leave the fork's code not compiling: upstream renames and
+    # removes APIs, and the fork's own code still uses the old names. Repair it
+    # here, with the same model, instead of leaving it for a human.
+    # The log has to live inside the project: opencode refuses to read files
+    # outside the project directory in a non-interactive run.
+    BUILD_LOG="$REPO_ROOT/target/fork-resolve-build.log"
+    mkdir -p "$(dirname "$BUILD_LOG")"
+BUILD_PASSED=false
 for attempt in $(seq 1 "$BUILD_ATTEMPTS"); do
     echo "=== build check (attempt $attempt of $BUILD_ATTEMPTS) ==="
     # --all-features matters: the fork's own flags are enabled for everyone, but
@@ -274,7 +286,8 @@ for attempt in $(seq 1 "$BUILD_ATTEMPTS"); do
     # the fork-checks gate does compile unchecked.
     if cargo clippy --workspace --all-targets --all-features -- --deny warnings >"$BUILD_LOG" 2>&1; then
         echo "the build is clean"
-        exit 0
+        BUILD_PASSED=true
+        break
     fi
     ERRORS=$(grep -E "^(error|warning)(\[E[0-9]+\])?: " "$BUILD_LOG" | sort -u | head -40 || true)
     if [ -z "$ERRORS" ]; then
@@ -330,6 +343,132 @@ Final summary must list: each file, what broke, how you fixed it, and which comm
     echo "the repair is folded into the commits that own the code, checking again ..."
 done
 
-echo "error: the build is still broken after $BUILD_ATTEMPTS attempts --" >&2
-echo "the full log is at $BUILD_LOG" >&2
-exit 1
+if [ "$BUILD_PASSED" != true ]; then
+    echo "error: the build is still broken after $BUILD_ATTEMPTS attempts --" >&2
+    echo "the full log is at $BUILD_LOG" >&2
+    exit 1
+fi
+fi
+
+if [ "$TEST_TOUCHED_PACKAGES" = true ]; then
+    CHANGED_RUST_FILES=$(git diff --name-only "$ONTO"...HEAD -- '*.rs')
+    if [ -z "$CHANGED_RUST_FILES" ]; then
+        echo "No changed Rust files; skipping focused package tests."
+        exit 0
+    fi
+
+    TEST_METADATA="$REPO_ROOT/target/fork-resolve-metadata.json"
+    TEST_PACKAGE_FILE="$REPO_ROOT/target/fork-resolve-test-packages.txt"
+    TEST_LOG="$REPO_ROOT/target/fork-resolve-tests.log"
+    mkdir -p "$REPO_ROOT/target"
+    cargo metadata --no-deps --format-version 1 > "$TEST_METADATA"
+    : > "$TEST_PACKAGE_FILE"
+
+    while IFS= read -r FILE; do
+        DIRECTORY=$(dirname "$FILE")
+        while :; do
+            if [ -f "$DIRECTORY/Cargo.toml" ]; then
+                MANIFEST_PATH="$(cd "$DIRECTORY" && pwd)/Cargo.toml"
+                PACKAGE=$(jq -r --arg manifest "$MANIFEST_PATH" '.packages[] | select(.manifest_path == $manifest) | .name' "$TEST_METADATA")
+                if [ -n "$PACKAGE" ] && [ "$PACKAGE" != "null" ]; then
+                    printf '%s\n' "$PACKAGE" >> "$TEST_PACKAGE_FILE"
+                    break
+                fi
+            fi
+            [ "$DIRECTORY" != "." ] || break
+            PARENT_DIRECTORY=$(dirname "$DIRECTORY")
+            [ "$PARENT_DIRECTORY" != "$DIRECTORY" ] || break
+            DIRECTORY="$PARENT_DIRECTORY"
+        done
+    done <<< "$CHANGED_RUST_FILES"
+
+    TEST_PACKAGES=$(sort -u "$TEST_PACKAGE_FILE")
+    if [ -z "$TEST_PACKAGES" ]; then
+        echo "error: could not map changed Rust files to Cargo packages" >&2
+        exit 1
+    fi
+
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+        echo "error: xvfb-run is required for focused GPUI tests" >&2
+        exit 1
+    fi
+    if ! command -v cargo-nextest >/dev/null 2>&1; then
+        echo "cargo-nextest not found -- installing (cargo install cargo-nextest --locked) ..."
+        cargo install cargo-nextest --locked
+    fi
+
+    TEST_PACKAGE_ARGS=()
+    while IFS= read -r PACKAGE; do
+        [ -n "$PACKAGE" ] || continue
+        TEST_PACKAGE_ARGS+=(--package "$PACKAGE")
+    done <<< "$TEST_PACKAGES"
+    TEST_COMMAND="xvfb-run -a cargo nextest run --no-fail-fast --no-tests=warn"
+    for PACKAGE in $TEST_PACKAGES; do
+        TEST_COMMAND="$TEST_COMMAND --package $PACKAGE"
+    done
+
+    TESTS_PASSED=false
+    for attempt in $(seq 0 "$TEST_ATTEMPTS"); do
+        TEST_RUN=$((attempt + 1))
+        echo "=== focused tests (attempt $TEST_RUN of $((TEST_ATTEMPTS + 1))) ==="
+        echo "Changed packages: $TEST_PACKAGES"
+        if xvfb-run -a cargo nextest run --no-fail-fast --no-tests=warn "${TEST_PACKAGE_ARGS[@]}" > "$TEST_LOG" 2>&1; then
+            TEST_SUMMARY=$(grep -E 'Summary|Finished' "$TEST_LOG" | tail -20 || true)
+            if [ -n "$TEST_SUMMARY" ]; then
+                echo "$TEST_SUMMARY"
+            else
+                tail -30 "$TEST_LOG"
+            fi
+            TESTS_PASSED=true
+            break
+        fi
+
+        TEST_FAILURES=$(grep -E 'FAIL|failures:|panicked at|timed out|error:|Summary' "$TEST_LOG" | tail -80 || true)
+        if [ -z "$TEST_FAILURES" ]; then
+            TEST_FAILURES=$(tail -80 "$TEST_LOG")
+        fi
+        echo "focused tests failed; details from $TEST_LOG:"
+        echo "$TEST_FAILURES"
+        if [ "$AI" != true ]; then
+            echo "error: focused tests failed and --no-ai prevents automated repair" >&2
+            exit 1
+        fi
+        if [ "$attempt" -eq "$TEST_ATTEMPTS" ]; then
+            break
+        fi
+        if ! opencode run -m "$MODEL" --variant "$VARIANT" "The full rebase onto '$ONTO' is complete, but focused tests for the changed Rust packages failed. Fix the regression before handing this branch to the full fork-checks gate.
+
+The affected packages and exact test command are:
+$TEST_PACKAGES
+$TEST_COMMAND
+
+Failure output:
+$TEST_FAILURES
+
+Read the full test log at $TEST_LOG and inspect the changed Rust files. Reproduce the failures with the exact focused test command, fix the underlying behavior, and rerun it until all selected tests pass. Do not delete, skip, weaken, or retry away failing tests. Follow AGENTS.md and keep the fork feature intent intact.
+
+Fold every code fix into the existing commit that owns the affected code; do not add commits. Stage your changes, use git log/git blame to find the owning commit, create a fixup commit, and autosquash it with 'GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash $ONTO'. Resolve any autosquash conflict by hand. Finish with the same number of commits as before the repair, a clean tracked working tree, and 'git diff --check' clean."; then
+            echo "error: opencode could not repair the focused test failures" >&2
+            exit 1
+        fi
+        if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+            echo "error: opencode left the working tree dirty after test repair" >&2
+            exit 1
+        fi
+        COMMITS_NOW=$(git rev-list --count "$ONTO"..HEAD)
+        if [ "$COMMITS_NOW" != "$COMMITS_BEFORE" ]; then
+            echo "error: the test repair changed the number of commits ($COMMITS_BEFORE -> $COMMITS_NOW)" >&2
+            exit 1
+        fi
+        if ! git diff --check; then
+            echo "error: whitespace issues after focused test repair" >&2
+            exit 1
+        fi
+    done
+
+    if [ "$TESTS_PASSED" != true ]; then
+        echo "error: focused tests still fail after $TEST_ATTEMPTS repair attempt(s)" >&2
+        echo "the full log is at $TEST_LOG" >&2
+        exit 1
+    fi
+fi
