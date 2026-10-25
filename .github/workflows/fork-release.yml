@@ -25,9 +25,10 @@
 #
 # Leaving `branch` empty is the normal path; filling it in releases a branch
 # that already exists (e.g. one built locally, or one whose build job failed
-# and was fixed by hand). Tag scheme: fork-<upstream release>
-# (e.g. fork-v1.20.2); -pre tags are skipped. Set skip_checks only to bypass
-# the gate.
+# and was fixed by hand). `resolve_only` builds a temporary release branch,
+# waits for fork-checks, then deletes it without tagging or publishing. Tag
+# scheme: fork-<upstream release> (e.g. fork-v1.20.2); -pre tags are skipped.
+# Set skip_checks only to bypass the gate.
 #
 # The jobs run on the fork's own Namespace runner profiles:
 # namespace-profile-zed-linux for the Linux bundle and the small helper jobs,
@@ -56,6 +57,11 @@ on:
         required: false
         default: false
         type: boolean
+      resolve_only:
+        description: "Build a temporary release branch, run fork-checks, and do not publish"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -69,6 +75,15 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  validate-resolve-only:
+    if: ${{ inputs.resolve_only && inputs.branch != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an empty branch input for resolve-only runs
+        run: |
+          echo "::error::resolve_only requires an empty branch input so the workflow can build a temporary release branch"
+          exit 1
+
   build-branch:
     # Only when no branch was given: the job builds the release branch.
     if: ${{ inputs.branch == '' }}
@@ -162,10 +177,10 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # The image has no cmake, which the WebRTC build script needs for
-          # the build check after the replay.
-          if ! command -v cmake >/dev/null 2>&1; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq cmake
+          # The image needs cmake for the WebRTC build and ripgrep for the
+          # conflict resolver's repository searches.
+          if ! command -v cmake >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq cmake ripgrep
           fi
 
           rm -rf "$WORK_DIR"
@@ -211,8 +226,9 @@ jobs:
             git fetch origin
             git checkout -B develop "origin/develop"
             # The build check after the replay needs the same toolchain the
-            # checks use.
+            # checks use. The resolver also uses ripgrep to inspect conflicts.
             ./script/linux
+            sudo apt-get install -y ripgrep
             ./script/download-wasi-sdk
             bash /tmp/fork-release --no-push --model "${{ env.OPENCODE_MODEL_FALLBACK }}"
             git bundle create /tmp/release.bundle "$(git rev-parse --abbrev-ref HEAD)"
@@ -236,12 +252,17 @@ jobs:
             release/fork-v*) ;;
             *) echo "::error::the built branch must look like 'release/fork-vX.Y.Z' (got '$BRANCH')"; exit 1 ;;
           esac
-          # A branch from an earlier attempt would block the push, and its
-          # fork-checks run would be for the wrong head.
-          git push origin --delete "$BRANCH" 2>/dev/null || true
-          git push origin "refs/remotes/built/$BRANCH:refs/heads/$BRANCH"
-          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
-          echo "Pushed $BRANCH"
+          if [ "${{ inputs.resolve_only }}" = "true" ]; then
+            PUSH_BRANCH="release/ci-fork-${{ github.run_id }}"
+          else
+            # A branch from an earlier attempt would block the push, and its
+            # fork-checks run would be for the wrong head.
+            git push origin --delete "$BRANCH" 2>/dev/null || true
+            PUSH_BRANCH="$BRANCH"
+          fi
+          git push origin "refs/remotes/built/$BRANCH:refs/heads/$PUSH_BRANCH"
+          echo "name=$PUSH_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Pushed $PUSH_BRANCH"
 
       - name: Wait for fork-checks on the release branch
         env:
@@ -273,11 +294,19 @@ jobs:
             exit 1
           fi
 
+      - name: Delete temporary resolve-only branch
+        if: ${{ always() && inputs.resolve_only && steps.branch.outputs.name != '' }}
+        run: |
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if ! git push origin --delete "$BRANCH"; then
+            echo "::warning::could not delete temporary branch $BRANCH"
+          fi
+
   guard:
     needs: build-branch
     # build-branch only runs when no branch was given, so when one was
     # given the job is skipped and this one has to run anyway.
-    if: ${{ always() && (needs.build-branch.result == 'success' || inputs.branch != '') }}
+    if: ${{ !inputs.resolve_only && always() && (needs.build-branch.result == 'success' || inputs.branch != '') }}
     runs-on: namespace-profile-zed-linux
     outputs:
       tag: ${{ steps.tag.outputs.value }}

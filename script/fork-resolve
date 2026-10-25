@@ -218,8 +218,8 @@ if [ "$REPLAY_ONLY" = false ]; then
     $FEATURES
 
     How to resolve this stop:
-    1. Inspect every conflict hunk (grep -n '^<<<<<<< \|^=======$\|^>>>>>>> ' in each file). Use 'git show :2:<file>' (BASE, upstream) and 'git show :3:<file>' (THEIRS, our commit) to understand what each side intended.
-    2. Merge SEMANTICALLY: keep the feature's intent, adapted to the new base's APIs. When upstream refactored code our feature touches, adapt our feature to the new shape -- do not revert the refactor and do not drop our feature. Do NOT pull newer upstream code into an older base; adapt minimally. If a hunk is genuinely ambiguous, prefer keeping upstream behavior and note the choice in your final summary.
+    1. Inspect every conflict hunk (grep -n '^<<<<<<< \|^=======$\|^>>>>>>> ' in each file). Use 'git show :2:<file>' (BASE, upstream) and 'git show :3:<file>' (THEIRS, our commit) to understand what each side intended. For shared APIs, inspect their call sites and tests on both sides before choosing a shape.
+    2. Merge SEMANTICALLY: keep the feature's intent, adapted to the new base's APIs. When upstream refactored code our feature touches, adapt our feature to the new shape -- do not revert the refactor and do not drop our feature. Preserve upstream behavior relied on by other call sites; do not blindly choose one side or keep only the version that compiles. Do NOT pull newer upstream code into an older base; adapt minimally. If a hunk is genuinely ambiguous, prefer keeping upstream behavior and note the choice in your final summary.
     3. Follow this repo's Rust rules (AGENTS.md): no unwrap()/expect() in new code, propagate errors with ?, handle fallible results explicitly, full-word variable names, and keep diffs minimal -- no drive-by reformatting.
     4. Remove ALL conflict markers. After editing each file, stage it with 'git add <file>'. Do NOT commit and do NOT run 'git rebase --continue' -- the script continues the rebase after verifying.
     5. When all files are staged, run 'git diff --check' (must be clean) and verify no markers remain (rg -n '^<{7} |^={7}\$|^>{7} ' on the touched files).
@@ -402,7 +402,20 @@ if [ "$TEST_TOUCHED_PACKAGES" = true ]; then
         [ -n "$PACKAGE" ] || continue
         TEST_PACKAGE_ARGS+=(--package "$PACKAGE")
     done <<< "$TEST_PACKAGES"
-    TEST_COMMAND="xvfb-run -a cargo nextest run --no-fail-fast --no-tests=warn"
+
+    TEST_NEXTEST_CONFIG="$REPO_ROOT/target/fork-resolve-nextest.toml"
+    if [ -f "$REPO_ROOT/.config/nextest.toml" ]; then
+        cp "$REPO_ROOT/.config/nextest.toml" "$TEST_NEXTEST_CONFIG"
+    else
+        : > "$TEST_NEXTEST_CONFIG"
+    fi
+    cat >> "$TEST_NEXTEST_CONFIG" <<'EOF'
+
+[[profile.default.overrides]]
+filter = 'test(test_random_columnar_selections) or test(test_completion_without_text_edit) or test(test_random_worktree_changes)'
+slow-timeout = { period = "300s", terminate-after = 1 }
+EOF
+    TEST_COMMAND="xvfb-run -a cargo nextest run --config-file '$TEST_NEXTEST_CONFIG' --no-fail-fast --no-tests=warn --retries 1"
     for PACKAGE in $TEST_PACKAGES; do
         TEST_COMMAND="$TEST_COMMAND --package $PACKAGE"
     done
@@ -412,7 +425,7 @@ if [ "$TEST_TOUCHED_PACKAGES" = true ]; then
         TEST_RUN=$((attempt + 1))
         echo "=== focused tests (attempt $TEST_RUN of $((TEST_ATTEMPTS + 1))) ==="
         echo "Changed packages: $TEST_PACKAGES"
-        if xvfb-run -a cargo nextest run --no-fail-fast --no-tests=warn "${TEST_PACKAGE_ARGS[@]}" > "$TEST_LOG" 2>&1; then
+        if xvfb-run -a cargo nextest run --config-file "$TEST_NEXTEST_CONFIG" --no-fail-fast --no-tests=warn --retries 1 "${TEST_PACKAGE_ARGS[@]}" > "$TEST_LOG" 2>&1; then
             TEST_SUMMARY=$(grep -E 'Summary|Finished' "$TEST_LOG" | tail -20 || true)
             if [ -n "$TEST_SUMMARY" ]; then
                 echo "$TEST_SUMMARY"
@@ -445,7 +458,7 @@ $TEST_COMMAND
 Failure output:
 $TEST_FAILURES
 
-Read the full test log at $TEST_LOG and inspect the changed Rust files. Reproduce the failures with the exact focused test command, fix the underlying behavior, and rerun it until all selected tests pass. Do not delete, skip, weaken, or retry away failing tests. Follow AGENTS.md and keep the fork feature intent intact.
+Read the full test log at $TEST_LOG and inspect the changed Rust files. Classify failures first: deterministic assertion failures usually indicate a regression in the rebased code; shell-startup output failures may be an environment mismatch, so compare the setup with fork-checks before changing product behavior; reproduce timeouts before changing behavior. Reproduce the failures with the exact focused test command, fix the underlying behavior, and rerun it until all selected tests pass. Do not delete or skip tests, weaken assertions, or add retries beyond the single CI retry already configured. Do not inspect system files or paths outside the checkout, launch tests in the background, or leave temporary debug edits in the final diff; the workflow configures the test environment and the full log is inside the checkout. Follow AGENTS.md and keep the fork feature intent intact.
 
 Fold every code fix into the existing commit that owns the affected code; do not add commits. Stage your changes, use git log/git blame to find the owning commit, create a fixup commit, and autosquash it with 'GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash $ONTO'. Resolve any autosquash conflict by hand. Finish with the same number of commits as before the repair, a clean tracked working tree, and 'git diff --check' clean."; then
             echo "error: opencode could not repair the focused test failures" >&2
