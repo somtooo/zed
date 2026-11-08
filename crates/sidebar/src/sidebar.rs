@@ -7436,39 +7436,37 @@ impl Sidebar {
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()
             .when(!no_open_projects, |this| {
-                this.border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .when(traffic_lights, |this| {
-                        this.child(Divider::vertical().color(ui::DividerColor::Border))
-                    })
-                    .child(
-                        div().ml_1().child(
-                            Icon::new(IconName::MagnifyingGlass)
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        ),
-                    )
-                    .child(self.render_filter_input(cx))
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .when(
-                                self.selection.is_some()
-                                    && !self.filter_editor.focus_handle(cx).is_focused(window),
-                                |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                this.when(traffic_lights, |this| {
+                    this.child(Divider::vertical().color(ui::DividerColor::Border))
+                })
+                .child(
+                    div().ml_1().child(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+                )
+                .child(self.render_filter_input(cx))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .when(
+                            self.selection.is_some()
+                                && !self.filter_editor.focus_handle(cx).is_focused(window),
+                            |this| this.child(KeyBinding::for_action(&FocusSidebarFilter, cx)),
+                        )
+                        .when(has_query, |this| {
+                            this.child(
+                                IconButton::new("clear_filter", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Clear Search"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_filter_editor_text(window, cx);
+                                        this.update_entries(cx);
+                                    })),
                             )
-                            .when(has_query, |this| {
-                                this.child(
-                                    IconButton::new("clear_filter", IconName::Close)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::text("Clear Search"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.reset_filter_editor_text(window, cx);
-                                            this.update_entries(cx);
-                                        })),
-                                )
-                            }),
-                    )
+                        }),
+                )
             })
             .when(right_window_controls, |this| {
                 this
@@ -7557,8 +7555,6 @@ impl Sidebar {
             .p_1()
             .gap_1()
             .when(on_right, |this| this.flex_row_reverse())
-            .border_t_1()
-            .border_color(cx.theme().colors().border)
             .child(self.render_sidebar_toggle_button(cx))
             .child(
                 IconButton::new("history", IconName::Clock)
@@ -7802,6 +7798,10 @@ impl Sidebar {
         );
 
         self._subscriptions.push(subscription);
+        // The archive's search header is rendered by the sidebar, so the
+        // sidebar must re-render whenever the archive changes.
+        self._subscriptions
+            .push(cx.observe(&archive_view, |_, _, cx| cx.notify()));
         self.view = SidebarView::Archive(archive_view.clone());
         archive_view.update(cx, |view, cx| view.focus_filter_editor(window, cx));
         self.serialize(cx);
@@ -7984,6 +7984,8 @@ impl Render for Sidebar {
 
         let color = cx.theme().colors();
         let bg = color.background.blend(color.panel_background);
+        let background = color.background;
+        let border = color.border;
 
         let no_open_projects = !self.contents.has_open_projects;
         let no_search_results = self.contents.entries.is_empty();
@@ -8062,60 +8064,84 @@ impl Render for Sidebar {
                         }),
                 }
             })
-            .bg(bg)
-            .when(self.side(cx) == SidebarSide::Left, |el| el.border_r_1())
-            .when(self.side(cx) == SidebarSide::Right, |el| el.border_l_1())
-            .border_color(color.border)
+            .bg(background)
             .map(|this| match &self.view {
-                SidebarView::ThreadList => this
-                    .child(self.render_sidebar_header(no_open_projects, window, cx))
+                SidebarView::ThreadList => {
+                    this.child(self.render_sidebar_header(no_open_projects, window, cx))
+                }
+                SidebarView::Archive(archive_view) => {
+                    this.child(archive_view.update(cx, |archive_view, cx| {
+                        archive_view.render_header(window, cx).into_any_element()
+                    }))
+                }
+            })
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .my_1p5()
                     .map(|this| {
-                        if no_open_projects {
-                            this.child(self.render_empty_state(cx))
+                        if self.side(cx) == SidebarSide::Left {
+                            this.ml_1p5()
                         } else {
-                            this.child(
-                                v_flex()
-                                    .relative()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .child(
-                                        list(
-                                            self.list_state.clone(),
-                                            cx.processor(Self::render_list_entry),
-                                        )
-                                        .flex_1()
-                                        .size_full(),
-                                    )
-                                    .when(no_search_results, |this| {
-                                        this.child(self.render_no_results(cx))
-                                    })
-                                    .when_some(sticky_header, |this, header| this.child(header))
-                                    .custom_scrollbars(
-                                        Scrollbars::new(ScrollAxes::Vertical)
-                                            .tracked_scroll_handle(&self.list_state),
-                                        window,
-                                        cx,
-                                    ),
-                            )
+                            this.mr_1p5()
                         }
+                    })
+                    .bg(bg)
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(border)
+                    .map(|this| match &self.view {
+                        SidebarView::ThreadList => this.map(|this| {
+                            if no_open_projects {
+                                this.child(self.render_empty_state(cx))
+                            } else {
+                                this.child(
+                                    v_flex()
+                                        .relative()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .child(
+                                            list(
+                                                self.list_state.clone(),
+                                                cx.processor(Self::render_list_entry),
+                                            )
+                                            .flex_1()
+                                            .size_full(),
+                                        )
+                                        .when(no_search_results, |this| {
+                                            this.child(self.render_no_results(cx))
+                                        })
+                                        .when_some(sticky_header, |this, header| this.child(header))
+                                        .custom_scrollbars(
+                                            Scrollbars::new(ScrollAxes::Vertical)
+                                                .tracked_scroll_handle(&self.list_state),
+                                            window,
+                                            cx,
+                                        ),
+                                )
+                            }
+                        }),
+                        SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
+                    })
+                    .map(|this| {
+                        let show_acp = self.should_render_acp_import_onboarding(cx);
+                        let show_cross_channel =
+                            self.should_render_cross_channel_import_onboarding(cx);
+
+                        let verbose = *self
+                            .import_banners_use_verbose_labels
+                            .get_or_insert(show_acp && show_cross_channel);
+
+                        this.when(show_acp, |this| {
+                            this.child(self.render_acp_import_onboarding(verbose, cx))
+                        })
+                        .when(show_cross_channel, |this| {
+                            this.child(self.render_cross_channel_import_onboarding(verbose, cx))
+                        })
                     }),
-                SidebarView::Archive(archive_view) => this.child(archive_view.clone()),
-            })
-            .map(|this| {
-                let show_acp = self.should_render_acp_import_onboarding(cx);
-                let show_cross_channel = self.should_render_cross_channel_import_onboarding(cx);
-
-                let verbose = *self
-                    .import_banners_use_verbose_labels
-                    .get_or_insert(show_acp && show_cross_channel);
-
-                this.when(show_acp, |this| {
-                    this.child(self.render_acp_import_onboarding(verbose, cx))
-                })
-                .when(show_cross_channel, |this| {
-                    this.child(self.render_cross_channel_import_onboarding(verbose, cx))
-                })
-            })
+            )
             .child(self.render_sidebar_bottom_bar(cx))
     }
 }

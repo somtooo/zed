@@ -569,6 +569,10 @@ impl Member {
                 let pane = div()
                     .relative()
                     .size_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .overflow_hidden()
                     .when(is_maximized, |this| {
                         this.bg(cx.theme().colors().background)
                             .border_1()
@@ -587,6 +591,7 @@ impl Member {
                                 .size_full()
                                 .left_0()
                                 .top_0()
+                                .rounded_lg()
                                 .border_2()
                                 .border_color(color),
                         )
@@ -1158,7 +1163,7 @@ mod element {
 
     use super::{HANDLE_HITBOX_SIZE, HORIZONTAL_MIN_SIZE, VERTICAL_MIN_SIZE};
 
-    const DIVIDER_SIZE: f32 = 1.0;
+    const PANE_GAP: f32 = 6.0;
 
     pub(super) fn pane_axis(
         axis: Axis,
@@ -1207,7 +1212,6 @@ mod element {
 
     struct PaneAxisHandleLayout {
         hitbox: Hitbox,
-        divider_bounds: Bounds<Pixels>,
     }
 
     impl PaneAxisElement {
@@ -1251,8 +1255,10 @@ mod element {
 
             // This is basically a "bucket" of pixel changes that need to be applied in response to this
             // mouse event. Probably a small, fractional number like 0.5 or 1.5 pixels
-            let mut proposed_current_pixel_change =
-                (e.position - child_start).along(axis) - size(ix, flexes.as_slice());
+            // The handle sits in the middle of the gap after the child, not at its edge.
+            let mut proposed_current_pixel_change = (e.position - child_start).along(axis)
+                - px(PANE_GAP / 2.)
+                - size(ix, flexes.as_slice());
 
             // This takes a pixel change, and computes the flex changes that correspond to this pixel change
             // as well as the next one, for some reason
@@ -1319,30 +1325,27 @@ mod element {
             window.refresh();
         }
 
+        fn size_without_gaps(size: Size<Pixels>, axis: Axis, child_count: usize) -> Size<Pixels> {
+            let gaps = px(PANE_GAP) * child_count.saturating_sub(1) as f32;
+            size.apply_along(axis, |length| (length - gaps).max(px(0.)))
+        }
+
         fn layout_handle(
             axis: Axis,
             pane_bounds: Bounds<Pixels>,
             window: &mut Window,
             _cx: &mut App,
         ) -> PaneAxisHandleLayout {
+            let handle_size = HANDLE_HITBOX_SIZE.max(PANE_GAP);
             let handle_bounds = Bounds {
                 origin: pane_bounds.origin.apply_along(axis, |origin| {
-                    origin + pane_bounds.size.along(axis) - px(HANDLE_HITBOX_SIZE / 2.)
+                    origin + pane_bounds.size.along(axis) + px((PANE_GAP - handle_size) / 2.)
                 }),
-                size: pane_bounds
-                    .size
-                    .apply_along(axis, |_| px(HANDLE_HITBOX_SIZE)),
-            };
-            let divider_bounds = Bounds {
-                origin: pane_bounds
-                    .origin
-                    .apply_along(axis, |origin| origin + pane_bounds.size.along(axis)),
-                size: pane_bounds.size.apply_along(axis, |_| px(DIVIDER_SIZE)),
+                size: pane_bounds.size.apply_along(axis, |_| px(handle_size)),
             };
 
             PaneAxisHandleLayout {
                 hitbox: window.insert_hitbox(handle_bounds, HitboxBehavior::BlockMouse),
-                divider_bounds,
             }
         }
     }
@@ -1408,7 +1411,8 @@ mod element {
             let total_flex = len as f32;
 
             let mut origin = bounds.origin;
-            let space_per_flex = bounds.size.along(self.axis) / total_flex;
+            let space_per_flex =
+                Self::size_without_gaps(bounds.size, self.axis, len).along(self.axis) / total_flex;
 
             let mut bounding_boxes = self.bounding_boxes.lock();
             bounding_boxes.clear();
@@ -1434,7 +1438,9 @@ mod element {
                 child.layout_as_root(child_size.into(), window, cx);
                 child.prepaint_at(origin, window, cx);
 
-                origin = origin.apply_along(self.axis, |val| val + child_size.along(self.axis));
+                origin = origin.apply_along(self.axis, |val| {
+                    val + child_size.along(self.axis) + px(PANE_GAP)
+                });
 
                 let is_leaf_pane = self.is_leaf_pane_mask.get(ix).copied().unwrap_or(true);
 
@@ -1490,6 +1496,7 @@ mod element {
                 .border_size
                 .and_then(|val| (val >= 0.).then_some(val));
 
+            let child_count = layout.children.len();
             for (ix, child) in &mut layout.children.iter_mut().enumerate() {
                 if overlay_opacity.is_some() || overlay_border.is_some() {
                     // the overlay has to be painted in origin+1px with size width-1px
@@ -1543,11 +1550,6 @@ mod element {
                         window.set_cursor_style(cursor_style, &handle.hitbox);
                     }
 
-                    window.paint_quad(gpui::fill(
-                        handle.divider_bounds,
-                        cx.theme().colors().pane_group_border,
-                    ));
-
                     window.on_mouse_event({
                         let dragged_handle = layout.dragged_handle.clone();
                         let flexes = self.flexes.clone();
@@ -1575,6 +1577,8 @@ mod element {
                         let flexes = self.flexes.clone();
                         let child_bounds = child.bounds;
                         let axis = self.axis;
+                        let container_size =
+                            Self::size_without_gaps(bounds.size, axis, child_count);
                         move |e: &MouseMoveEvent, phase, window, cx| {
                             let dragged_handle = dragged_handle.borrow();
                             if phase.bubble() && *dragged_handle == Some(ix) {
@@ -1584,7 +1588,7 @@ mod element {
                                     ix,
                                     axis,
                                     child_bounds.origin,
-                                    bounds.size,
+                                    container_size,
                                     workspace.clone(),
                                     window,
                                     cx,

@@ -10181,6 +10181,8 @@ impl Render for Workspace {
                                         .flex()
                                         .flex_row()
                                         .h_full()
+                                        .p_1p5()
+                                        .gap_1p5()
                                         .children(self.render_dock(
                                             DockPosition::Left,
                                             &self.left_dock,
@@ -10192,10 +10194,12 @@ impl Render for Workspace {
                                                 .flex()
                                                 .flex_col()
                                                 .flex_1()
+                                                .gap_1p5()
                                                 .overflow_hidden()
                                                 .child(
                                                     h_flex()
                                                         .flex_1()
+                                                        .overflow_hidden()
                                                         .when_some(
                                                             centered_paddings.0,
                                                             |this, p| this.child(p.border_r_1()),

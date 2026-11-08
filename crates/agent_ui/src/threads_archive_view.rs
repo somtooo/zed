@@ -857,7 +857,7 @@ impl ThreadsArchiveView {
         .detach_and_log_err(cx);
     }
 
-    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
         let sidebar_on_left = matches!(
             AgentSettings::get_global(cx).sidebar_side(),
@@ -899,8 +899,6 @@ impl ThreadsArchiveView {
             .when(!right_window_controls, |this| this.pr_1p5())
             .gap_1()
             .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
             .when(traffic_lights, |this| {
                 this.child(Divider::vertical().color(ui::DividerColor::Border))
             })
@@ -1112,7 +1110,6 @@ impl Render for ThreadsArchiveView {
             .on_action(cx.listener(Self::remove_selected_thread))
             .on_action(cx.listener(Self::archive_selected_thread))
             .size_full()
-            .child(self.render_header(window, cx))
             .when(!has_query, |this| this.child(self.render_toolbar(cx)))
             .child(content)
     }
